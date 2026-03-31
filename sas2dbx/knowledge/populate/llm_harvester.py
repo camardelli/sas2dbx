@@ -407,3 +407,208 @@ class LLMHarvester:
             encoding="utf-8",
         )
         logger.debug("LLMHarvester: gravado %s (%d entradas)", target, len(merged))
+
+
+# ---------------------------------------------------------------------------
+# Prompts para harvest individual (um item por vez)
+# ---------------------------------------------------------------------------
+
+_SINGLE_PROMPTS: dict[str, str] = {
+    "function": """\
+Você é um especialista em migração SAS para PySpark.
+
+Gere o mapeamento YAML para a função SAS "{key}" para PySpark.
+
+Responda APENAS com YAML neste schema exato:
+```yaml
+{key}:
+  pyspark: "expressão PySpark equivalente com placeholders {{col}}, {{arg1}}"
+  notes: "diferenças de comportamento, ordem de args, NULL handling"
+  confidence: 0.0
+```
+
+Se não há equivalente direto, use confidence < 0.5 e explique alternativa em notes.
+Responda APENAS com o YAML, sem texto adicional.""",
+
+    "proc": """\
+Você é um especialista em migração SAS para PySpark/Databricks.
+
+Gere o mapeamento YAML para o PROC SAS "{key}" para PySpark.
+
+Schema exato:
+```yaml
+{key}:
+  approach: "rule"
+  tier: "Tier.RULE"
+  notes: "abordagem de transpilação, opções principais, gotchas"
+  confidence: 0.0
+```
+
+approach deve ser: "rule" | "llm" | "manual"
+tier deve ser: "Tier.RULE" | "Tier.LLM" | "Tier.MANUAL"
+Responda APENAS com o YAML.""",
+
+    "sql_dialect": """\
+Você é um especialista em diferenças entre SAS PROC SQL e Spark SQL.
+
+Gere a regra de diferença de dialeto para "{key}".
+
+Schema exato:
+```yaml
+{key}:
+  sas: "exemplo de sintaxe SAS SQL"
+  spark: "equivalente Spark SQL"
+  notes: "explicação da diferença e como converter"
+  confidence: 0.0
+```
+
+Responda APENAS com o YAML.""",
+
+    "format": """\
+Você é um especialista em formatos SAS e conversão para PySpark.
+
+Gere o mapeamento para o formato SAS "{key}".
+
+Schema exato:
+```yaml
+{key}:
+  pyspark: "expressão PySpark para aplicar o formato"
+  notes: "diferenças e gotchas"
+  confidence: 0.0
+```
+
+Responda APENAS com o YAML.""",
+
+    "informat": """\
+Você é um especialista em informats SAS e conversão para PySpark.
+
+Gere o mapeamento para o informat SAS "{key}".
+
+Schema exato:
+```yaml
+{key}:
+  pyspark: "expressão PySpark para ler/converter"
+  notes: "diferenças e gotchas"
+  confidence: 0.0
+```
+
+Responda APENAS com o YAML.""",
+}
+
+
+# ---------------------------------------------------------------------------
+# LLMSingleHarvester — harvest de uma entrada por vez (on-demand)
+# ---------------------------------------------------------------------------
+
+
+class LLMSingleHarvester:
+    """Harvesta uma única entrada via LLM (para uso on-demand pelo KnowledgeStore).
+
+    Diferente do LLMHarvester (batch), este gera uma entrada por vez
+    com prompt focado e response parsing mais restrito.
+
+    Args:
+        llm_client: LLMClient configurado (ou qualquer objeto com método complete()).
+    """
+
+    def __init__(self, llm_client: object) -> None:
+        self._llm = llm_client
+
+    def harvest_single_sync(self, category: str, key: str) -> dict | None:
+        """Versão síncrona de harvest_single() — compatível com código não-async.
+
+        Args:
+            category: "function" | "proc" | "sql_dialect" | "format" | "informat"
+            key: Nome da entrada (ex: "PRXMATCH", "TRANSPOSE", "WEEKDATE.")
+
+        Returns:
+            Dict com o mapeamento ou None se LLM não conseguiu.
+        """
+        import asyncio
+
+        return asyncio.run(self.harvest_single(category=category, key=key))
+
+    async def harvest_single(self, category: str, key: str) -> dict | None:
+        """Gera mapeamento para uma única entrada via LLM.
+
+        Args:
+            category: "function" | "proc" | "sql_dialect" | "format" | "informat"
+            key: Nome da entrada (ex: "PRXMATCH", "TRANSPOSE", "WEEKDATE.")
+
+        Returns:
+            Dict com o mapeamento ou None se LLM retornou YAML inválido/vazio.
+        """
+        prompt_template = _SINGLE_PROMPTS.get(category)
+        if prompt_template is None:
+            logger.warning(
+                "LLMSingleHarvester: categoria desconhecida '%s'", category
+            )
+            return None
+
+        prompt = prompt_template.format(key=key)
+        response = await self._llm.complete(prompt)  # type: ignore[attr-defined]
+
+        return self._parse_single_response(response.content, key, category)
+
+    def _parse_single_response(
+        self, content: str, key: str, category: str
+    ) -> dict | None:
+        """Extrai e valida o dict de mapeamento da resposta do LLM.
+
+        Tenta 3 formas de extrair:
+          1. {key: {...}} → retorna o value
+          2. Dict direto com campos do schema (sem wrapper de chave)
+          3. Extrai bloco ```yaml e repete
+
+        Returns:
+            Dict do mapeamento validado ou None.
+        """
+        content = content.strip()
+
+        # Remove fences markdown (```yaml ... ``` ou ``` ... ```)
+        clean = self._strip_fences(content)
+
+        data = self._try_parse_yaml(clean)
+        if data is None:
+            logger.warning(
+                "LLMSingleHarvester: YAML inválido para %s '%s'", category, key
+            )
+            return None
+
+        # Caso 1: {KEY: {...}}
+        if key in data and isinstance(data[key], dict):
+            return data[key]
+
+        # Caso 2: dict direto com campos do schema
+        schema_fields = {"pyspark", "notes", "confidence", "approach", "sas", "spark"}
+        if isinstance(data, dict) and schema_fields & data.keys():
+            return data
+
+        logger.warning(
+            "LLMSingleHarvester: formato inesperado para %s '%s': keys=%s",
+            category, key, list(data.keys())[:5],
+        )
+        return None
+
+    @staticmethod
+    def _strip_fences(content: str) -> str:
+        """Remove delimitadores de bloco de código markdown."""
+        lines = content.splitlines()
+        # Remove primeira linha se for ``` ou ```yaml
+        if lines and lines[0].strip().startswith("```"):
+            lines = lines[1:]
+        # Remove última linha se for ```
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        return "\n".join(lines).strip()
+
+    @staticmethod
+    def _try_parse_yaml(content: str) -> dict | None:
+        """Tenta parsear YAML; retorna None em falha."""
+        try:
+            result = yaml.safe_load(content)
+            if isinstance(result, dict):
+                return result
+        except yaml.YAMLError:
+            pass
+        return None
