@@ -69,8 +69,9 @@ def migrate(
     from sas2dbx.ingest.reader import read_sas_file, split_blocks
     from sas2dbx.ingest.scanner import scan_directory
 
-    if resume:
-        console.print("[yellow]--resume: funcionalidade disponível na Story 3.1.[/yellow]")
+    if resume and not output:
+        console.print("[red]Erro: --resume requer --output para localizar o state file.[/red]")
+        raise typer.Exit(1)
 
     # 1 — Scan
     try:
@@ -393,3 +394,57 @@ def analyze(
         console.print(
             f"\n[yellow]{len(graph.warnings)} warning(s) — use --verbose para detalhes[/yellow]"
         )
+
+
+# ---------------------------------------------------------------------------
+# sas2dbx status
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def status(
+    output_dir: Path = typer.Argument(..., help="Diretório de saída com .sas2dbx_state.json"),
+) -> None:
+    """Exibe o status atual de uma migração pelo state file."""
+    from sas2dbx.models.migration_result import JobStatus
+    from sas2dbx.transpile.state import MigrationStateManager
+
+    state = MigrationStateManager(output_dir)
+    if not state.state_path.exists():
+        console.print(
+            f"[yellow]Nenhuma migração encontrada em {output_dir}[/yellow]"
+        )
+        raise typer.Exit(0)
+
+    state.load()
+    statuses = state.get_all_statuses()
+
+    if not statuses:
+        console.print("[yellow]State file vazio.[/yellow]")
+        raise typer.Exit(0)
+
+    _STATUS_STYLE = {
+        JobStatus.DONE: "green",
+        JobStatus.FAILED: "red",
+        JobStatus.IN_PROGRESS: "yellow",
+        JobStatus.PENDING: "dim",
+    }
+
+    table = Table(title=f"Migration Status — {output_dir}", show_header=True)
+    table.add_column("Job", style="cyan", no_wrap=True)
+    table.add_column("Status", justify="center")
+
+    counts: dict[JobStatus, int] = {s: 0 for s in JobStatus}
+    for job_id, job_status in sorted(statuses.items()):
+        style = _STATUS_STYLE.get(job_status, "")
+        table.add_row(job_id, f"[{style}]{job_status.value.upper()}[/{style}]")
+        counts[job_status] += 1
+
+    console.print(table)
+    console.print(
+        f"\nResumo: "
+        f"[green]{counts[JobStatus.DONE]} DONE[/green] · "
+        f"[red]{counts[JobStatus.FAILED]} FAILED[/red] · "
+        f"[yellow]{counts[JobStatus.IN_PROGRESS]} IN_PROGRESS[/yellow] · "
+        f"[dim]{counts[JobStatus.PENDING]} PENDING[/dim]"
+    )
