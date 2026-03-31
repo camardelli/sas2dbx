@@ -422,8 +422,6 @@ def document(
     recursive: bool = typer.Option(True, "--recursive/--no-recursive", help="Busca recursiva"),
 ) -> None:
     """Gera documentação técnica (README.md por job + ARCHITECTURE.md + Explorer HTML)."""
-    import os
-
     from sas2dbx.analyze.classifier import classify_block
     from sas2dbx.analyze.dependency import DependencyAnalyzer
     from sas2dbx.analyze.parser import BlockDeps, extract_block_deps
@@ -432,7 +430,7 @@ def document(
     from sas2dbx.document.visual import ArchitectureExplorer
     from sas2dbx.ingest.reader import read_sas_file, split_blocks
     from sas2dbx.ingest.scanner import scan_directory
-    from sas2dbx.models.migration_result import MigrationResult
+    from sas2dbx.models.migration_result import JobStatus, MigrationResult
     from sas2dbx.transpile.llm.client import LLMClient, LLMConfig
 
     if fmt not in ("md", "html", "all"):
@@ -441,9 +439,7 @@ def document(
         )
         raise typer.Exit(1)
 
-    # Resolve API key
-    resolved_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
-    if not resolved_key:
+    if not api_key:
         console.print(
             "[red]Erro: ANTHROPIC_API_KEY não definida. "
             "Use --api-key ou export ANTHROPIC_API_KEY=sk-...[/red]"
@@ -493,7 +489,7 @@ def document(
             progress.advance(parse_task)
 
     # 3 — JobDocumentor (LLM) per job
-    llm_config = LLMConfig(provider=provider, model=model, api_key=resolved_key)
+    llm_config = LLMConfig(provider=provider, model=model, api_key=api_key)
     llm_client = LLMClient(llm_config)
     doc_engine = JobDocumentor(llm_client=llm_client)
 
@@ -523,7 +519,6 @@ def document(
                 if fmt in ("md", "all"):
                     doc_engine.write_doc(result, jobs_dir)
                 job_docs[job_name] = result.content
-                from sas2dbx.models.migration_result import JobStatus
                 results.append(
                     MigrationResult(
                         job_id=job_name,
@@ -533,7 +528,6 @@ def document(
                 )
             except Exception as exc:  # noqa: BLE001
                 console.print(f"  [red]✗[/red] {job_name}: {exc}")
-                from sas2dbx.models.migration_result import JobStatus
                 results.append(
                     MigrationResult(
                         job_id=job_name,

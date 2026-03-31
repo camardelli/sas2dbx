@@ -77,6 +77,7 @@ class ArchitectureExplorer:
         job_tiers = job_tiers or {}
 
         total = len(execution_order)
+
         def _status(j: str) -> JobStatus:
             return results_by_id.get(j, MigrationResult(job_id=j)).status
 
@@ -467,7 +468,8 @@ def _build_svg(
         node_id = "node-" + job.replace("-", "_").replace(".", "_")
         # Trunca label se muito longo
         label = job if len(job) <= 18 else job[:15] + "…"
-        onclick = f"showDetail('{job}')"
+        js_key = json.dumps(job).replace('"', '&quot;')
+        onclick = f"showDetail({js_key})"
         svg_parts.extend([
             f'  <g class="job-node" id="{node_id}" onclick="{onclick}">',
             f'    <rect x="{x}" y="{y}" width="{node_w}" height="{node_h}" '
@@ -540,7 +542,7 @@ def _compute_layers(execution_order: list[str], edges: list[list[str]]) -> dict[
 
 def _infer_tier(status: str) -> str:
     """Tier inferido do status quando job_tiers não fornecido."""
-    return "rule" if status == "done" else "unknown"
+    return {"done": "rule", "failed": "manual"}.get(status, "unknown")
 
 
 def _extract_objective(doc_content: str) -> str:
