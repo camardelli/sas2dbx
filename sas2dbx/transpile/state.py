@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -182,8 +183,10 @@ class MigrationStateManager:
 
     def _save(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self._path, "w", encoding="utf-8") as f:
+        tmp = self._path.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(self._state, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, self._path)
         logger.debug("StateManager: state gravado em %s", self._path)
 
 
