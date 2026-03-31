@@ -202,6 +202,19 @@ class TestMacros:
         deps = extract_block_deps(_block(code))
         assert "CALC_TOTALS" in deps.macros_called
 
+    def test_macro_invocation_extracts_qualified_inputs(self) -> None:
+        """Parâmetros lib.member em invocação de macro viram inputs."""
+        code = "%calc_totals(dataset=sasdata.vendas, var=valor, groupby=depto);"
+        deps = extract_block_deps(_block(code))
+        assert "SASDATA.VENDAS" in deps.inputs
+
+    def test_macro_invocation_unqualified_not_input(self) -> None:
+        """Parâmetros sem qualificador (ex: valor) não viram inputs."""
+        code = "%calc_totals(dataset=sasdata.vendas, var=valor, groupby=depto);"
+        deps = extract_block_deps(_block(code))
+        assert "VALOR" not in deps.inputs
+        assert "DEPTO" not in deps.inputs
+
     def test_defined_macro_not_in_called(self) -> None:
         """Macro definida no mesmo bloco não deve aparecer em macros_called."""
         code = "%MACRO mymacro;\n    %PUT hello;\n%MEND mymacro;\n%mymacro;"

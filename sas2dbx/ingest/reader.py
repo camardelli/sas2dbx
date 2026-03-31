@@ -46,6 +46,19 @@ _LIBNAME_COMPLETE = re.compile(
     re.IGNORECASE,
 )
 
+# Keywords SAS % que NÃO são invocações de macro do usuário
+_MACRO_CALL_SAS_KEYWORDS = frozenset({
+    "MACRO", "MEND", "IF", "THEN", "ELSE", "DO", "END", "LET", "PUT",
+    "INCLUDE", "GLOBAL", "LOCAL", "SYSFUNC", "SYSEVALF", "SYSCALL",
+    "STR", "NRSTR", "QUOTE", "NRQUOTE", "BQUOTE", "NRBQUOTE",
+    "SUPERQ", "UNQUOTE", "EVAL", "NREVAL", "SCAN", "SUBSTR",
+    "UPCASE", "LOWCASE", "TRIM", "LEFT", "RETURN", "GOTO",
+    "ABORT", "STOP", "TO", "BY", "WHILE", "UNTIL",
+})
+
+# Detecta início de invocação de macro: %name( ou %name;
+_MACRO_INVOCATION_LINE = re.compile(r"^\s*%(\w+)", re.IGNORECASE)
+
 
 def read_sas_file(path: str | Path, encoding: str | None = None) -> tuple[str, str]:
     """Lê um arquivo SAS, retornando (code, encoding_usado).
@@ -105,6 +118,7 @@ def split_blocks(code: str, source_file: Path | None = None) -> list[SASBlock]:
     block_start_line = 0
     in_block = False
     in_macro = False
+    in_macro_call = False  # invocação de macro standalone (não %MACRO/%MEND)
 
     for i, line in enumerate(lines, 1):
         stripped = line.strip()
@@ -133,6 +147,22 @@ def split_blocks(code: str, source_file: Path | None = None) -> list[SASBlock]:
                     blocks.append(_make_block(current_lines, block_start_line, i, source_file))
                     current_lines = []
                     in_block = False
+            else:
+                # Invocação de macro standalone: %name(...); ou %name;
+                m = _MACRO_INVOCATION_LINE.match(stripped)
+                if m and m.group(1).upper() not in _MACRO_CALL_SAS_KEYWORDS:
+                    in_block = True
+                    in_macro_call = True
+                    block_start_line = i
+                    current_lines = [line]
+                    # Linha única: termina com ;
+                    if stripped.endswith(";"):
+                        blocks.append(
+                            _make_block(current_lines, block_start_line, i, source_file)
+                        )
+                        current_lines = []
+                        in_block = False
+                        in_macro_call = False
         else:
             current_lines.append(line)
 
@@ -143,6 +173,12 @@ def split_blocks(code: str, source_file: Path | None = None) -> list[SASBlock]:
                     current_lines = []
                     in_block = False
                     in_macro = False
+            elif in_macro_call:
+                if stripped.endswith(";"):
+                    blocks.append(_make_block(current_lines, block_start_line, i, source_file))
+                    current_lines = []
+                    in_block = False
+                    in_macro_call = False
             else:
                 if _BLOCK_END_RUN_QUIT.search(stripped):
                     blocks.append(_make_block(current_lines, block_start_line, i, source_file))

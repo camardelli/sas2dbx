@@ -283,3 +283,22 @@ class TestHashObject:
         result = classify_block(sas)
         assert result.construct_type == "HASH_OBJECT"
         assert result.tier == Tier.MANUAL
+
+
+class TestMacroInvocation:
+    def test_macro_invocation_classified(self) -> None:
+        result = classify_block("%calc_totals(dataset=sasdata.vendas, var=valor);")
+        assert result.construct_type == "MACRO_INVOCATION"
+        assert result.tier == Tier.LLM
+
+    def test_macro_invocation_no_args(self) -> None:
+        result = classify_block("%init_libs;")
+        assert result.construct_type == "MACRO_INVOCATION"
+
+    def test_macro_definition_not_invocation(self) -> None:
+        result = classify_block("%MACRO calc;\n    %PUT ok;\n%MEND calc;")
+        assert result.construct_type != "MACRO_INVOCATION"
+
+    def test_sas_keyword_put_not_invocation(self) -> None:
+        result = classify_block("%PUT some message;")
+        assert result.construct_type == "UNKNOWN"

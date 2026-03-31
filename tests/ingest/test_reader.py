@@ -85,6 +85,29 @@ class TestSplitBlocks:
         assert len(blocks) == 1
         assert "%MACRO" in blocks[0].raw_code
 
+    def test_macro_invocation_single_line(self) -> None:
+        code = "%calc_totals(dataset=sasdata.vendas, var=valor);"
+        blocks = split_blocks(code)
+        assert len(blocks) == 1
+        assert "%calc_totals" in blocks[0].raw_code.lower()
+
+    def test_macro_invocation_multiline(self) -> None:
+        code = "%my_macro(\n    arg1=sasdata.a,\n    arg2=foo\n);"
+        blocks = split_blocks(code)
+        assert len(blocks) == 1
+        assert "%my_macro" in blocks[0].raw_code.lower()
+
+    def test_macro_invocation_and_data_step(self) -> None:
+        code = "%init_libs();\nDATA out;\n    SET inp;\nRUN;"
+        blocks = split_blocks(code)
+        assert len(blocks) == 2
+
+    def test_sas_macro_keywords_not_captured_as_blocks(self) -> None:
+        """Statements %LET, %IF, %DO fora de blocos não viram blocos isolados."""
+        code = "DATA x;\n    SET y;\nRUN;\n%PUT done;"
+        blocks = split_blocks(code)
+        assert len(blocks) == 1  # só o DATA step
+
     def test_multiple_blocks(self) -> None:
         code = (
             "DATA x; SET y; RUN;\n"

@@ -128,10 +128,17 @@ def extract_block_deps(block: SASBlock | str) -> BlockDeps:
             if name not in deps.macros_called:
                 deps.macros_called.append(name)
 
-    is_proc_sql = bool(re.match(r"^\s*PROC\s+SQL\b", code.strip(), re.IGNORECASE))
+    stripped_code = code.strip()
+    is_proc_sql = bool(re.match(r"^\s*PROC\s+SQL\b", stripped_code, re.IGNORECASE))
+    is_macro_invocation = (
+        bool(re.match(r"^\s*%\w+", stripped_code, re.IGNORECASE))
+        and not bool(re.match(r"^\s*%MACRO\b", stripped_code, re.IGNORECASE))
+    )
 
     if is_proc_sql:
         _extract_sql_deps(code, deps)
+    elif is_macro_invocation:
+        _extract_macro_invocation_deps(code, deps)
     else:
         _extract_datastep_proc_deps(code, deps)
 
@@ -192,6 +199,18 @@ def _extract_datastep_proc_deps(code: str, deps: BlockDeps) -> None:
             ds = _normalize_ds(m.group(1))
             if ds and ds not in deps.outputs:
                 deps.outputs.append(ds)
+
+
+def _extract_macro_invocation_deps(code: str, deps: BlockDeps) -> None:
+    """Extrai inputs de uma invocação de macro standalone.
+
+    Extrai referências lib.member presentes nos argumentos como inputs potenciais.
+    Nomes sem qualificador (ex: `valor`, `depto`) são ignorados.
+    """
+    for m in re.finditer(r"\b(\w+\.\w+)\b", code, re.IGNORECASE):
+        ds = _normalize_ds(m.group(1))
+        if ds and ds not in deps.inputs:
+            deps.inputs.append(ds)
 
 
 def _normalize_ds(raw: str) -> str | None:

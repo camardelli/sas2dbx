@@ -31,6 +31,8 @@ SUPPORTED_CONSTRUCTS: dict[str, Tier] = {
     "PROC_SUMMARY": Tier.LLM,
     "PROC_FREQ": Tier.LLM,
     "MACRO_SIMPLE": Tier.LLM,        # %macro/%mend sem recursão/geração dinâmica
+    # Invocação de macro do usuário (standalone %name(...))
+    "MACRO_INVOCATION": Tier.LLM,
     # Tier 3 — manual flag (sem transpilação automática, preserva SAS original)
     "PROC_FORMAT": Tier.MANUAL,
     "PROC_REPORT": Tier.MANUAL,
@@ -49,6 +51,16 @@ _CONFIDENCE: dict[Tier, float] = {
 # ---------------------------------------------------------------------------
 # Padrões de detecção (case-insensitive)
 # ---------------------------------------------------------------------------
+
+# Keywords SAS % que não são invocações de macro do usuário
+_MACRO_INVOCATION_KEYWORDS = frozenset({
+    "MACRO", "MEND", "IF", "THEN", "ELSE", "DO", "END", "LET", "PUT",
+    "INCLUDE", "GLOBAL", "LOCAL", "SYSFUNC", "SYSEVALF", "SYSCALL",
+    "STR", "NRSTR", "QUOTE", "NRQUOTE", "BQUOTE", "NRBQUOTE",
+    "SUPERQ", "UNQUOTE", "EVAL", "NREVAL", "SCAN", "SUBSTR",
+    "UPCASE", "LOWCASE", "TRIM", "LEFT", "RETURN", "GOTO",
+    "ABORT", "STOP", "TO", "BY", "WHILE", "UNTIL",
+})
 
 # Indicadores de complexidade num DATA step
 _DATA_COMPLEX_PATTERNS = re.compile(
@@ -138,6 +150,11 @@ def _detect_construct(block: str) -> str:
     # Macro definition
     if re.match(r"^\s*%MACRO\s+", stripped, re.IGNORECASE):
         return _classify_macro(stripped)
+
+    # Standalone macro invocation: %name(...) ou %name;
+    m = re.match(r"^\s*%(\w+)", stripped, re.IGNORECASE)
+    if m and m.group(1).upper() not in _MACRO_INVOCATION_KEYWORDS:
+        return "MACRO_INVOCATION"
 
     return "UNKNOWN"
 
