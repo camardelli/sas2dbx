@@ -72,6 +72,9 @@ class KhonGatewayProvider(LLMProvider):
 
         t0 = time.monotonic()
         try:
+            # NOTE: urllib.request.urlopen é síncrono/bloqueante dentro de async def.
+            # Para o MVP sequencial isso é aceitável; em uso concorrente bloqueia o
+            # event loop. Substituir por aiohttp/httpx quando necessário.
             with urllib.request.urlopen(req, timeout=120) as resp:
                 body = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:

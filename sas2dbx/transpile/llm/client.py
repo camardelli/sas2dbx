@@ -206,6 +206,11 @@ class LLMClient:
                 token=self._config.khon_token or "",
                 model=self._config.model,
             )
+        if self._config.provider != "anthropic":
+            logger.warning(
+                "LLMClient: provider desconhecido '%s' — usando AnthropicProvider como padrão",
+                self._config.provider,
+            )
         return AnthropicProvider(
             api_key=self._config.api_key or "",
             model=self._config.model,

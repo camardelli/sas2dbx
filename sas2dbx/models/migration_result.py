@@ -71,3 +71,4 @@ class MigrationResult:
     warnings: list[str] = field(default_factory=list)
     error: str | None = None
     completed_at: str | None = None
+    validation_result: ValidationResult | None = None
