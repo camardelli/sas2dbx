@@ -116,6 +116,30 @@ class TestAutoexec:
         graph = analyzer.analyze([])
         assert graph.global_libnames == {}
 
+    def test_analyze_idempotent_second_call(self, tmp_path: Path) -> None:
+        """M2 fix: segunda chamada a analyze() não herda estado da primeira."""
+        autoexec = tmp_path / "autoexec.sas"
+        autoexec.write_text("LIBNAME A '/path/a';\nLIBNAME B '/path/b';\n",
+                            encoding="utf-8")
+        analyzer = DependencyAnalyzer(autoexec_path=autoexec)
+        g1 = analyzer.analyze([])
+        g2 = analyzer.analyze([])
+        assert g1.global_libnames == g2.global_libnames
+        assert len(g2.global_libnames) == 2  # não acumulou
+
+    def test_analyze_state_reset_between_calls(self, tmp_path: Path) -> None:
+        """M2 fix: instância sem autoexec após chamada com autoexec retorna vazio."""
+        autoexec = tmp_path / "autoexec.sas"
+        autoexec.write_text("LIBNAME X '/path';\n", encoding="utf-8")
+
+        analyzer_with = DependencyAnalyzer(autoexec_path=autoexec)
+        analyzer_with.analyze([])  # popula _global_libnames
+
+        # Nova instância sem autoexec não deve ter state do anterior
+        analyzer_fresh = DependencyAnalyzer()
+        g = analyzer_fresh.analyze([])
+        assert g.global_libnames == {}
+
     def test_real_autoexec_fixture(self) -> None:
         autoexec = FIXTURES_DIR / "autoexec.sas"
         analyzer = DependencyAnalyzer(autoexec_path=autoexec)
@@ -271,6 +295,21 @@ class TestExecutionOrder:
         graph = DependencyAnalyzer().analyze(files)
         order = graph.get_execution_order()
         assert len(order) == 3
+
+    def test_execution_order_cycle_returns_all_jobs(self, tmp_path: Path) -> None:
+        """Ciclo no grafo não deve travar — todos os jobs devem estar na ordem."""
+        files = [
+            _sas_file(tmp_path, "job_a.sas",
+                      "DATA sasdata.a;\n    SET sasdata.c;\nRUN;"),
+            _sas_file(tmp_path, "job_b.sas",
+                      "DATA sasdata.b;\n    SET sasdata.a;\nRUN;"),
+            _sas_file(tmp_path, "job_c.sas",
+                      "DATA sasdata.c;\n    SET sasdata.b;\nRUN;"),
+        ]
+        graph = DependencyAnalyzer().analyze(files)
+        order = graph.get_execution_order()
+        assert set(order) == {"job_a", "job_b", "job_c"}
+        assert len(order) == 3  # sem duplicatas
 
 
 # ---------------------------------------------------------------------------

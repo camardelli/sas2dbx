@@ -82,7 +82,10 @@ class DependencyGraph:
             if dependent in predecessors and prerequisite in all_job_names:
                 predecessors[dependent].add(prerequisite)
 
-        # Kahn's algorithm
+        # Kahn's algorithm.
+        # Nota: queue.pop(0) é O(n) e queue.sort() é O(k log k) por iteração —
+        # O(n² log n) no pior caso. Aceitável para dezenas de jobs SAS no MVP.
+        # Se o escopo crescer para centenas de jobs, substituir por heapq.
         in_degree = {j: len(preds) for j, preds in predecessors.items()}
         queue = sorted(j for j, deg in in_degree.items() if deg == 0)
         result: list[str] = []

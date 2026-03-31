@@ -46,9 +46,11 @@ _DS_NAME = r"((?:\w+\.)?\w+)"
 # LIBNAME declaration
 _RE_LIBNAME = re.compile(r"^\s*LIBNAME\s+(\w+)", re.IGNORECASE | re.MULTILINE)
 
-# DATA step output: "DATA lib.name name2;" — captura nomes até ";" ou fim
-_RE_DATA_OUTPUT = re.compile(
-    r"^\s*DATA\s+((?:(?!\b_NULL_\b)(?:\w+\.)?\w+\s*)+?)\s*;",
+# DATA step header: captura tudo entre "DATA" e ";" incluindo opções inline
+# Ex: "DATA work.out(keep=id) work.err;" → "work.out(keep=id) work.err"
+# _normalize_ds remove as opções por token individualmente
+_RE_DATA_HEADER = re.compile(
+    r"^\s*DATA\s+([^;]+);",
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -126,13 +128,12 @@ def extract_block_deps(block: SASBlock | str) -> BlockDeps:
             if name not in deps.macros_called:
                 deps.macros_called.append(name)
 
-    upper = code.upper()
     is_proc_sql = bool(re.match(r"^\s*PROC\s+SQL\b", code.strip(), re.IGNORECASE))
 
     if is_proc_sql:
         _extract_sql_deps(code, deps)
     else:
-        _extract_datastep_proc_deps(code, upper, deps)
+        _extract_datastep_proc_deps(code, deps)
 
     return deps
 
@@ -160,13 +161,14 @@ def _extract_sql_deps(code: str, deps: BlockDeps) -> None:
             deps.inputs.append(ds)
 
 
-def _extract_datastep_proc_deps(code: str, upper: str, deps: BlockDeps) -> None:
+def _extract_datastep_proc_deps(code: str, deps: BlockDeps) -> None:
     """Extrai inputs/outputs de DATA steps e PROCs não-SQL."""
     is_data_step = bool(re.match(r"^\s*DATA\b", code.strip(), re.IGNORECASE))
 
     if is_data_step:
-        # Outputs: DATA lib.name;
-        m = _RE_DATA_OUTPUT.match(code.strip())
+        # Outputs: captura header completo até ";" e extrai nomes por token.
+        # _normalize_ds remove opções inline: "work.out(keep=x)" → "WORK.OUT"
+        m = _RE_DATA_HEADER.match(code.strip())
         if m:
             for ds_raw in m.group(1).split():
                 ds = _normalize_ds(ds_raw)

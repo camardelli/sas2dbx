@@ -62,6 +62,10 @@ class DependencyAnalyzer:
         Returns:
             DependencyGraph com jobs, edges e warnings.
         """
+        # Reseta estado para garantir idempotência entre chamadas sucessivas
+        self._global_libnames = {}
+        self._manual_deps = {}
+
         # 1 — Carrega contexto global
         if self._autoexec_path:
             self._global_libnames = self._parse_autoexec(self._autoexec_path)

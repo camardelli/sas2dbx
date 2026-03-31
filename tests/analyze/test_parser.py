@@ -84,6 +84,19 @@ class TestDataStep:
         # RETAIN não gera dataset
         assert all("ACUMULADO" not in ds for ds in deps.inputs)
 
+    def test_output_with_inline_options(self) -> None:
+        """M1 fix: DATA step com opções inline não perde o output."""
+        code = "DATA work.out(keep=id nome);\n    SET sasdata.inp;\nRUN;"
+        deps = extract_block_deps(_block(code))
+        assert "WORK.OUT" in deps.outputs
+
+    def test_multiple_outputs_with_inline_options(self) -> None:
+        """M1 fix: múltiplos outputs, um com opções, ambos capturados."""
+        code = "DATA work.out(keep=id) sasout.erros;\n    SET inp;\nRUN;"
+        deps = extract_block_deps(_block(code))
+        assert "WORK.OUT" in deps.outputs
+        assert "SASOUT.ERROS" in deps.outputs
+
 
 # ---------------------------------------------------------------------------
 # PROC SQL

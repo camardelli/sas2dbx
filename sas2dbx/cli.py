@@ -327,8 +327,7 @@ def analyze(
     ) as progress:
         task = progress.add_task("Classificando constructs...", total=len(sas_files))
         for sas_file in sas_files:
-            sas_file.encoding = read_sas_file(sas_file.path)[1]  # QA M3
-            code, _ = read_sas_file(sas_file.path)
+            code, sas_file.encoding = read_sas_file(sas_file.path)
             for block in split_blocks(code, source_file=sas_file.path):
                 result = classify_block(block.raw_code)
                 construct_counts[result.construct_type] = (
