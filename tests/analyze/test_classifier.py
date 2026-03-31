@@ -10,7 +10,6 @@ from sas2dbx.analyze.classifier import (
 )
 from sas2dbx.models.sas_ast import ClassificationResult, Tier
 
-
 # ---------------------------------------------------------------------------
 # AC-1: SUPPORTED_CONSTRUCTS documenta todos os constructs de Tier 1 e Tier 2
 # ---------------------------------------------------------------------------

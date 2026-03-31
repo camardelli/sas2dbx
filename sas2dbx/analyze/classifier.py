@@ -119,7 +119,7 @@ def _detect_construct(block: str) -> str:
     Retorna sempre uma chave válida de SUPPORTED_CONSTRUCTS.
     """
     stripped = block.strip()
-    upper = stripped.upper()
+    stripped.upper()
 
     # LIBNAME (antes de PROC/DATA para evitar colisão)
     if re.match(r"^\s*LIBNAME\s+", stripped, re.IGNORECASE):

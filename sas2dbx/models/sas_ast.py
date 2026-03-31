@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from enum import Enum
+from dataclasses import dataclass, field
+from enum import StrEnum
+from pathlib import Path
 
 
-class Tier(str, Enum):
+class Tier(StrEnum):
     """Tier de transpilação de um construct SAS."""
 
     RULE = "rule"    # Tier 1 — determinístico, sem LLM
@@ -31,6 +32,40 @@ class ValidationReport:
     warnings: list[str]
     coverage: float
     missing_references: list[str]
+
+
+@dataclass
+class SASFile:
+    """Arquivo .sas descoberto pelo scanner.
+
+    Attributes:
+        path: Caminho absoluto do arquivo.
+        size_bytes: Tamanho em bytes.
+        encoding: Encoding detectado na leitura.
+    """
+
+    path: Path
+    size_bytes: int
+    encoding: str = "utf-8"
+
+
+@dataclass
+class SASBlock:
+    """Bloco lógico de código SAS (DATA step, PROC, LIBNAME, %MACRO, etc.).
+
+    Attributes:
+        raw_code: Código SAS original do bloco.
+        start_line: Linha inicial no arquivo fonte (1-indexed).
+        end_line: Linha final no arquivo fonte (1-indexed).
+        source_file: Arquivo de origem (None se criado em memória).
+        classification: Resultado da classificação (None se ainda não classificado).
+    """
+
+    raw_code: str
+    start_line: int
+    end_line: int
+    source_file: Path | None = None
+    classification: ClassificationResult | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)

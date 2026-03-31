@@ -12,7 +12,6 @@ from sas2dbx.knowledge.populate.harvester import (
     _has_files,
 )
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -40,7 +39,9 @@ class TestHarvestMode:
         """HarvestMode.OFFLINE deve ser o valor padrão."""
         assert HarvestMode.OFFLINE == "offline"
 
-    def test_harvest_sas_offline_by_default(self, harvester: KnowledgeHarvester, tmp_path: Path) -> None:
+    def test_harvest_sas_offline_by_default(
+        self, harvester: KnowledgeHarvester, tmp_path: Path
+    ) -> None:
         """harvest_sas() sem mode arg usa OFFLINE."""
         import inspect
         sig = inspect.signature(harvester.harvest_sas)

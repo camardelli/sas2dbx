@@ -2,7 +2,6 @@
 
 from pathlib import Path
 
-import pytest
 import yaml
 from typer.testing import CliRunner
 
@@ -58,7 +57,8 @@ class TestBuildMappings:
         result = runner.invoke(app, ["knowledge", "build-mappings", "--base-path", str(tmp_path)])
         assert result.exit_code == 0
         # Rich table output ou ao menos confirmação
-        assert "merged" in result.output.lower() or "mapeamento" in result.output.lower() or "mapping" in result.output.lower()
+        out = result.output.lower()
+        assert "merged" in out or "mapeamento" in out or "mapping" in out
 
 
 # ---------------------------------------------------------------------------

@@ -8,13 +8,13 @@ from __future__ import annotations
 
 import logging
 import shutil
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 
-class HarvestMode(str, Enum):
+class HarvestMode(StrEnum):
     """Modo de coleta de documentação."""
 
     OFFLINE = "offline"  # padrão — lê arquivos locais em raw_input/

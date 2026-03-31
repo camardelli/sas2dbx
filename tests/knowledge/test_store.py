@@ -7,7 +7,6 @@ import yaml
 
 from sas2dbx.knowledge.store import KnowledgeStore
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -151,7 +150,9 @@ class TestGetReference:
     def test_returns_content_for_pyspark_ref(self, tmp_path: Path) -> None:
         api_dir = tmp_path / "pyspark_reference" / "dataframe_api"
         api_dir.mkdir(parents=True)
-        (api_dir / "groupby_agg.md").write_text("# groupBy().agg()\nAggregations.", encoding="utf-8")
+        (api_dir / "groupby_agg.md").write_text(
+            "# groupBy().agg()\nAggregations.", encoding="utf-8"
+        )
 
         store = KnowledgeStore(base_path=tmp_path)
         content = store.get_reference("pyspark", "dataframe_api", "groupby_agg")

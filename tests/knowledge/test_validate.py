@@ -8,7 +8,6 @@ import yaml
 from sas2dbx.knowledge.validate import validate_knowledge_store
 from sas2dbx.models.sas_ast import ValidationReport
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -93,7 +92,9 @@ class TestPopulatedStore:
         report = validate_knowledge_store(base_path=knowledge_with_mappings)
         assert report.coverage > 0.0
 
-    def test_high_confidence_entries_give_high_coverage(self, knowledge_with_mappings: Path) -> None:
+    def test_high_confidence_entries_give_high_coverage(
+        self, knowledge_with_mappings: Path
+    ) -> None:
         """Todas as entradas têm confidence >= 0.7 → coverage = 1.0."""
         report = validate_knowledge_store(base_path=knowledge_with_mappings)
         assert report.coverage == 1.0
@@ -105,7 +106,7 @@ class TestPopulatedStore:
 
 class TestMissingReferences:
     def test_proc_rule_without_md_is_in_missing_refs(self, knowledge_with_mappings: Path) -> None:
-        """PROCs com approach=rule mas sem .md em sas_reference/procs/ aparecem em missing_references."""
+        """PROCs approach=rule sem .md em sas_reference/procs/ aparecem em missing_references."""
         report = validate_knowledge_store(base_path=knowledge_with_mappings)
         # SQL e SORT são rule mas não têm .md → devem aparecer
         assert len(report.missing_references) >= 2

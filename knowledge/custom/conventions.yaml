@@ -1,0 +1,42 @@
+# knowledge/custom/conventions.yaml
+# Convenções de naming e regras de negócio do ambiente.
+# Usadas pelo transpiler para gerar nomes de tabelas/colunas consistentes.
+#
+# ---------------------------------------------------------------------------
+
+naming:
+  # Prefixos de datasets SAS → sufixos/prefixos de tabelas Delta
+  dataset_prefix_map:
+    # "WORK." → tabelas temporárias, não persistir no Unity Catalog
+    WORK: null
+    # "SASDATA." → main.raw
+    SASDATA: "main.raw"
+    # "SASTEMP." → main.staging
+    SASTEMP: "main.staging"
+    # "SASOUT." → main.migrated
+    SASOUT: "main.migrated"
+
+  # Convenção de nomes de colunas
+  column_case: snake_case         # snake_case | camelCase | UPPER_SNAKE
+  table_case: snake_case          # snake_case | camelCase | UPPER_SNAKE
+
+  # Prefixos/sufixos a remover no nome de tabelas migradas
+  strip_prefixes: []
+  strip_suffixes: []
+
+business_rules:
+  # Ano fiscal começa em qual mês? (1 = Janeiro, padrão)
+  fiscal_year_start_month: 1
+
+  # Timezone padrão para conversões de data
+  default_timezone: "America/Sao_Paulo"
+
+  # Formato de data padrão no ambiente SAS
+  default_date_format: "DATE9."   # ex: 01JAN2025
+
+exceptions:
+  # Datasets que NÃO devem ser migrados (dados históricos/arquivados)
+  skip_datasets: []
+
+  # Tabelas que já existem no Unity Catalog e não devem ser sobrescritas
+  readonly_tables: []

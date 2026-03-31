@@ -1,0 +1,41 @@
+# knowledge/custom/libnames.yaml
+# Mapeamento de bibliotecas SAS (LIBNAME) para Unity Catalog (catalog.schema).
+#
+# Campos obrigatórios:
+#   catalog_schema: destino no Unity Catalog ("catalog.schema")
+#
+# Campos opcionais:
+#   description: descrição da biblioteca
+#   depends_on_jobs: lista de jobs que devem ter sido executados antes de usar esta lib
+#     (usado pelo analyze/dependency.py para inferir dependências implícitas de jobs)
+#
+# Exemplo de uso no SAS:
+#   LIBNAME SASDATA '/data/sas/input';  →  spark.read.table("main.raw.tabela")
+#
+# ---------------------------------------------------------------------------
+
+SASDATA:
+  catalog_schema: main.raw
+  description: "Dados de entrada — tabelas brutas do ambiente source"
+  depends_on_jobs: []
+
+SASTEMP:
+  catalog_schema: main.staging
+  description: "Área de staging — tabelas temporárias de transformação"
+  depends_on_jobs: []
+
+SASOUT:
+  catalog_schema: main.migrated
+  description: "Dados de saída — resultado dos jobs migrados"
+  depends_on_jobs: []
+
+# ---------------------------------------------------------------------------
+# Template para adicionar novas bibliotecas:
+#
+# NOME_LIB:
+#   catalog_schema: catalog.schema
+#   description: "descrição"
+#   depends_on_jobs:
+#     - job_001_carga_clientes
+#     - job_002_transform_vendas
+# ---------------------------------------------------------------------------

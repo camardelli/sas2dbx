@@ -1,0 +1,31 @@
+# knowledge/custom/macros.yaml
+# Documentação de macros corporativas usadas nos jobs SAS.
+#
+# Campos:
+#   description: o que a macro faz
+#   params: parâmetros e seus tipos/defaults
+#   logic_summary: resumo da lógica para orientar a transpilação
+#   pyspark_equivalent: (opcional) equivalente PySpark conhecido
+#   tier: RULE | LLM | MANUAL — tier de transpilação sugerido
+#
+# ---------------------------------------------------------------------------
+
+# Exemplo — macro SCD Type 2:
+# MACRO_SCD2:
+#   description: "Aplica SCD Type 2 (Slowly Changing Dimension) em tabela destino"
+#   params:
+#     source_ds: "dataset SAS de origem"
+#     target_ds: "dataset SAS de destino"
+#     key_cols: "colunas de chave natural (separadas por espaço)"
+#     effective_date: "coluna de data de vigência"
+#   logic_summary: |
+#     1. Identifica registros novos (chave não existe no destino)
+#     2. Identifica registros modificados (chave existe mas atributos mudaram)
+#     3. Fecha registros anteriores (dt_fim = effective_date - 1)
+#     4. Insere novos/modificados com dt_inicio = effective_date, dt_fim = 31DEC9999
+#   pyspark_equivalent: "Delta Lake MERGE INTO com SCD2 pattern"
+#   tier: LLM
+
+# ---------------------------------------------------------------------------
+# Adicione macros corporativas abaixo seguindo o template acima.
+# ---------------------------------------------------------------------------

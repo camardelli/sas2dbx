@@ -7,6 +7,7 @@ from pathlib import Path
 
 import typer
 from rich.console import Console
+from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.table import Table
 
 app = typer.Typer(
@@ -34,6 +35,7 @@ _verbose_state: dict[str, bool] = {"value": False}
 def main(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Ativar logging DEBUG."),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Suprimir output de progresso."),
+    config: Path | None = typer.Option(None, "--config", help="Path para sas2dbx.yaml"),
 ) -> None:
     """SAS2DBX — migra jobs SAS para notebooks e workflows Databricks."""
     _verbose_state["value"] = verbose
@@ -42,6 +44,111 @@ def main(
         level=level,
         format="%(levelname)s %(name)s: %(message)s",
     )
+    if config and not config.exists():
+        console.print(
+            f"[yellow]Aviso: --config '{config}' não encontrado — usando padrões.[/yellow]"
+        )
+
+
+# ---------------------------------------------------------------------------
+# sas2dbx migrate
+# ---------------------------------------------------------------------------
+
+_TIER_STYLE = {"rule": "green", "llm": "yellow", "manual": "red"}
+
+
+@app.command()
+def migrate(
+    source_dir: Path = typer.Argument(..., help="Diretório com arquivos .sas (ou arquivo único)"),
+    output: Path | None = typer.Option(None, "--output", "-o", help="Diretório de saída"),
+    resume: bool = typer.Option(False, "--resume", help="Retomar migração interrompida"),
+    recursive: bool = typer.Option(True, "--recursive/--no-recursive", help="Busca recursiva"),
+) -> None:
+    """Migra jobs SAS para notebooks Databricks (inventário no Sprint 1)."""
+    from sas2dbx.analyze.classifier import classify_block
+    from sas2dbx.ingest.reader import read_sas_file, split_blocks
+    from sas2dbx.ingest.scanner import scan_directory
+
+    if resume:
+        console.print("[yellow]--resume: funcionalidade disponível na Story 3.1.[/yellow]")
+
+    # 1 — Scan
+    try:
+        sas_files = scan_directory(source_dir, recursive=recursive)
+    except FileNotFoundError as exc:
+        console.print(f"[red]Erro: {exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    if not sas_files:
+        console.print(f"[yellow]Nenhum arquivo .sas encontrado em {source_dir}[/yellow]")
+        raise typer.Exit(0)
+
+    console.print(f"\nEncontrados [bold]{len(sas_files)}[/bold] arquivo(s) .sas\n")
+
+    # 2 — Inventário: ler + dividir + classificar com progress bar
+    inventory_rows: list[tuple] = []
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("{task.completed}/{task.total}"),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Analisando blocos...", total=len(sas_files))
+
+        for sas_file in sas_files:
+            code, encoding = read_sas_file(sas_file.path)
+            blocks = split_blocks(code, source_file=sas_file.path)
+
+            if not blocks:
+                inventory_rows.append((
+                    sas_file.path.name, "—", "—", "—",
+                ))
+            else:
+                for block in blocks:
+                    result = classify_block(block.raw_code)
+                    block.classification = result
+                    inventory_rows.append((
+                        sas_file.path.name,
+                        result.construct_type,
+                        result.tier.value.upper(),
+                        f"{result.confidence:.1f}",
+                    ))
+
+            progress.advance(task)
+
+    # 3 — Exibir tabela de inventário
+    table = Table(title="Inventário de Blocos SAS", show_header=True)
+    table.add_column("Arquivo", style="cyan")
+    table.add_column("Construct")
+    table.add_column("Tier", justify="center")
+    table.add_column("Conf.", justify="right")
+
+    tier_counts: dict[str, int] = {"RULE": 0, "LLM": 0, "MANUAL": 0}
+    for filename, construct, tier, conf in inventory_rows:
+        style = _TIER_STYLE.get(tier.lower(), "")
+        table.add_row(filename, construct, f"[{style}]{tier}[/{style}]", conf)
+        if tier in tier_counts:
+            tier_counts[tier] += 1
+
+    console.print(table)
+
+    total = sum(tier_counts.values())
+    if total:
+        console.print(
+            f"\nResumo: "
+            f"[green]{tier_counts['RULE']} RULE[/green] · "
+            f"[yellow]{tier_counts['LLM']} LLM[/yellow] · "
+            f"[red]{tier_counts['MANUAL']} MANUAL[/red] "
+            f"de {total} bloco(s)"
+        )
+
+    if output:
+        console.print(
+            f"\n[dim]--output {output}: geração de notebooks disponível no Sprint 4.[/dim]"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -114,7 +221,9 @@ def build_mappings(
     table.add_row("[bold]Total[/bold]", f"[bold]{total}[/bold]")
 
     console.print(table)
-    console.print(f"[green]✓[/green] merged/ atualizado em [cyan]{base_path}/mappings/merged/[/cyan]")
+    console.print(
+        f"[green]✓[/green] merged/ atualizado em [cyan]{base_path}/mappings/merged/[/cyan]"
+    )
 
 
 # ---------------------------------------------------------------------------

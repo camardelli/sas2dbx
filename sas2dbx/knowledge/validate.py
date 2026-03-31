@@ -123,7 +123,7 @@ def validate_knowledge_store(base_path: str | Path = "./knowledge") -> Validatio
     # Check 7 — cobertura (confidence >= 0.7)
     total_with_confidence = 0
     above_threshold = 0
-    for filename, data in all_mappings.items():
+    for _filename, data in all_mappings.items():
         for entry in data.values():
             if not isinstance(entry, dict):
                 continue

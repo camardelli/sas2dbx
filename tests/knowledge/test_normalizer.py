@@ -5,8 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from sas2dbx.knowledge.populate.normalizer import build_mappings, _load_yaml, MAPPING_FILES
-
+from sas2dbx.knowledge.populate.normalizer import MAPPING_FILES, _load_yaml, build_mappings
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -204,10 +203,11 @@ class TestManifest:
 
     def test_manifest_reflects_entry_counts(self, knowledge_dir: Path) -> None:
         generated = knowledge_dir / "mappings" / "generated"
-        (generated / "functions_map.yaml").write_text(
-            yaml.dump({"A": {"pyspark": "a", "confidence": 0.9}, "B": {"pyspark": "b", "confidence": 0.8}}),
-            encoding="utf-8",
-        )
+        data = {
+            "A": {"pyspark": "a", "confidence": 0.9},
+            "B": {"pyspark": "b", "confidence": 0.8},
+        }
+        (generated / "functions_map.yaml").write_text(yaml.dump(data), encoding="utf-8")
         build_mappings(base_path=knowledge_dir)
         manifest = yaml.safe_load((knowledge_dir / "manifest.yaml").read_text())
         assert manifest["mappings"]["functions_map"]["total_entries"] == 2

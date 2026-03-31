@@ -9,7 +9,7 @@ Regra fundamental:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -111,7 +111,7 @@ def _write_manifest(
 
     manifest: dict[str, Any] = {
         "version": "1.0.0",
-        "last_build": datetime.now(timezone.utc).isoformat(),
+        "last_build": datetime.now(UTC).isoformat(),
         "mappings": mappings_meta,
     }
 
