@@ -119,3 +119,54 @@ class TestValidateCli:
 
         result = runner.invoke(app, ["knowledge", "validate", "--base-path", str(tmp_path)])
         assert result.exit_code == 0
+
+
+# ---------------------------------------------------------------------------
+# migrate (QA L2 — smoke test do comando principal)
+# ---------------------------------------------------------------------------
+
+FIXTURES_DIR = Path(__file__).parent / "fixtures" / "sas"
+
+
+class TestMigrateCli:
+    def test_migrate_help(self) -> None:
+        result = runner.invoke(app, ["migrate", "--help"])
+        assert result.exit_code == 0
+        assert "source" in result.output.lower() or "migrate" in result.output.lower()
+
+    def test_migrate_fixtures_exits_0(self) -> None:
+        """smoke: migrate com fixtures reais deve sair com código 0."""
+        result = runner.invoke(app, ["migrate", str(FIXTURES_DIR)])
+        assert result.exit_code == 0, result.output
+
+    def test_migrate_shows_tiers(self) -> None:
+        """migrate deve exibir ao menos um tier na tabela."""
+        result = runner.invoke(app, ["migrate", str(FIXTURES_DIR)])
+        output = result.output.upper()
+        assert "RULE" in output or "LLM" in output or "MANUAL" in output
+
+    def test_migrate_nonexistent_dir_exits_1(self) -> None:
+        result = runner.invoke(app, ["migrate", "/nao/existe/xyz"])
+        assert result.exit_code == 1
+
+
+# ---------------------------------------------------------------------------
+# analyze (Sprint 2)
+# ---------------------------------------------------------------------------
+
+class TestAnalyzeCli:
+    def test_analyze_help(self) -> None:
+        result = runner.invoke(app, ["analyze", "--help"])
+        assert result.exit_code == 0
+
+    def test_analyze_fixtures_exits_0(self) -> None:
+        result = runner.invoke(app, ["analyze", str(FIXTURES_DIR)])
+        assert result.exit_code == 0, result.output
+
+    def test_analyze_shows_jobs(self) -> None:
+        result = runner.invoke(app, ["analyze", str(FIXTURES_DIR)])
+        assert "job_001" in result.output or "job_002" in result.output
+
+    def test_analyze_nonexistent_dir_exits_1(self) -> None:
+        result = runner.invoke(app, ["analyze", "/nao/existe/xyz"])
+        assert result.exit_code == 1

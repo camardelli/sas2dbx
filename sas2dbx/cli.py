@@ -100,6 +100,7 @@ def migrate(
 
         for sas_file in sas_files:
             code, encoding = read_sas_file(sas_file.path)
+            sas_file.encoding = encoding  # propaga encoding detectado (QA M3)
             blocks = split_blocks(code, source_file=sas_file.path)
 
             if not blocks:
@@ -180,8 +181,7 @@ def harvest(
             if version:
                 kwargs["version"] = version
             if path:
-                from pathlib import Path as _Path
-                kwargs["custom_path"] = _Path(path)
+                kwargs["custom_path"] = Path(path)
 
             harvester.harvest(source=source, **kwargs)
         except ValueError as exc:
@@ -270,3 +270,127 @@ def validate(
 
     if not report.is_valid:
         raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
+# sas2dbx analyze
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def analyze(
+    source_dir: Path = typer.Argument(..., help="Diretório com arquivos .sas (ou arquivo único)"),
+    autoexec: Path | None = typer.Option(
+        None, "--autoexec", help="Path para autoexec.sas com LIBNAMEs globais"
+    ),
+    libnames_yaml: Path | None = typer.Option(
+        None, "--libnames", help="Path para libnames.yaml com depends_on_jobs"
+    ),
+    recursive: bool = typer.Option(True, "--recursive/--no-recursive", help="Busca recursiva"),
+    show_order: bool = typer.Option(True, "--order/--no-order", help="Exibir ordem de execução"),
+) -> None:
+    """Analisa dependências entre jobs SAS e exibe o grafo de execução."""
+    from sas2dbx.analyze.classifier import classify_block
+    from sas2dbx.analyze.dependency import DependencyAnalyzer
+    from sas2dbx.ingest.reader import read_sas_file, split_blocks
+    from sas2dbx.ingest.scanner import scan_directory
+
+    # 1 — Scan
+    try:
+        sas_files = scan_directory(source_dir, recursive=recursive)
+    except FileNotFoundError as exc:
+        console.print(f"[red]Erro: {exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    # Exclui autoexec da análise de jobs
+    autoexec_path = autoexec or (source_dir / "autoexec.sas" if source_dir.is_dir() else None)
+    if autoexec_path and autoexec_path.exists():
+        sas_files = [f for f in sas_files if f.path != autoexec_path]
+
+    if not sas_files:
+        console.print(f"[yellow]Nenhum arquivo .sas encontrado em {source_dir}[/yellow]")
+        raise typer.Exit(0)
+
+    console.print(f"\nAnalisando [bold]{len(sas_files)}[/bold] job(s)...\n")
+
+    # 2 — Classificação de constructs por arquivo (cross-check Knowledge Store)
+    construct_counts: dict[str, int] = {}
+    manual_constructs: list[str] = []
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("{task.completed}/{task.total}"),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Classificando constructs...", total=len(sas_files))
+        for sas_file in sas_files:
+            sas_file.encoding = read_sas_file(sas_file.path)[1]  # QA M3
+            code, _ = read_sas_file(sas_file.path)
+            for block in split_blocks(code, source_file=sas_file.path):
+                result = classify_block(block.raw_code)
+                construct_counts[result.construct_type] = (
+                    construct_counts.get(result.construct_type, 0) + 1
+                )
+                if result.tier.value == "manual":
+                    manual_constructs.append(
+                        f"{sas_file.path.name}:{block.start_line} [{result.construct_type}]"
+                    )
+            progress.advance(task)
+
+    # 3 — Dependency analysis
+    analyzer = DependencyAnalyzer(
+        autoexec_path=autoexec_path if (autoexec_path and autoexec_path.exists()) else None,
+        libnames_yaml=libnames_yaml,
+    )
+    graph = analyzer.analyze(sas_files)
+
+    # 4 — Tabela de jobs e dependências
+    job_table = Table(title="Jobs SAS — Dependências", show_header=True)
+    job_table.add_column("Job", style="cyan", no_wrap=True)
+    job_table.add_column("Inputs", style="dim")
+    job_table.add_column("Outputs", style="dim")
+    job_table.add_column("Macros")
+    job_table.add_column("Libs")
+
+    for job_name in sorted(graph.jobs.keys()):
+        node = graph.jobs[job_name]
+        job_table.add_row(
+            job_name,
+            ", ".join(node.inputs[:3]) + ("…" if len(node.inputs) > 3 else ""),
+            ", ".join(node.outputs[:3]) + ("…" if len(node.outputs) > 3 else ""),
+            ", ".join(node.macros_called[:2]) + ("…" if len(node.macros_called) > 2 else ""),
+            ", ".join(node.libnames_declared[:3]),
+        )
+    console.print(job_table)
+
+    # 5 — Arestas implícitas
+    implicit = graph.get_implicit_dependencies()
+    if implicit:
+        console.print("\n[yellow]Dependências implícitas detectadas:[/yellow]")
+        for dep, prereq, ds in implicit:
+            console.print(f"  [yellow]⚠[/yellow] [cyan]{dep}[/cyan] ← {ds} ← [cyan]{prereq}[/cyan]")
+
+    # 6 — Ordem de execução
+    if show_order:
+        order = graph.get_execution_order()
+        console.print("\n[bold]Ordem de execução sugerida:[/bold]")
+        for i, job in enumerate(order, 1):
+            prefix = "└─" if i == len(order) else "├─"
+            console.print(f"  {prefix} {i}. [cyan]{job}[/cyan]")
+
+    # 7 — Constructs Tier.MANUAL (gap analysis Knowledge Store)
+    if manual_constructs:
+        console.print(f"\n[red]Constructs Tier MANUAL ({len(manual_constructs)}):[/red]")
+        for item in manual_constructs[:10]:
+            console.print(f"  [red]-[/red] {item}")
+        if len(manual_constructs) > 10:
+            console.print(f"  … e mais {len(manual_constructs) - 10}")
+
+    # 8 — Warnings do grafo
+    if graph.warnings:
+        console.print(
+            f"\n[yellow]{len(graph.warnings)} warning(s) — use --verbose para detalhes[/yellow]"
+        )

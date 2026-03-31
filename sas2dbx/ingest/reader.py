@@ -109,7 +109,8 @@ def split_blocks(code: str, source_file: Path | None = None) -> list[SASBlock]:
     for i, line in enumerate(lines, 1):
         stripped = line.strip()
 
-        # Linhas em branco e comentários de linha inteira (* ...; e /* ... */)
+        # Linhas em branco — comentários SAS (* ...; e /* ... */) não são filtrados
+        # aqui intencionalmente: podem conter terminadores que afetam o estado.
         if not stripped:
             if in_block:
                 current_lines.append(line)

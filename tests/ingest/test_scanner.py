@@ -109,9 +109,10 @@ class TestSingleFile:
 # ---------------------------------------------------------------------------
 
 class TestRealFixtures:
-    def test_finds_all_three_fixture_files(self) -> None:
+    def test_finds_fixture_files(self) -> None:
         files = scan_directory(FIXTURES_DIR)
-        assert len(files) == 3
+        # autoexec.sas + 3 jobs = 4 arquivos
+        assert len(files) == 4
 
     def test_fixture_names(self) -> None:
         files = scan_directory(FIXTURES_DIR)
@@ -119,3 +120,4 @@ class TestRealFixtures:
         assert "job_001_carga_clientes.sas" in names
         assert "job_002_transform_vendas.sas" in names
         assert "job_003_report_mensal.sas" in names
+        assert "autoexec.sas" in names
