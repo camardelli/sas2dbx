@@ -6,6 +6,23 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 
+@dataclass
+class SASOrigin:
+    """Rastreabilidade de uma célula ao bloco SAS de origem.
+
+    Attributes:
+        job_name: Nome do job SAS (filename sem extensão).
+        start_line: Linha inicial no arquivo SAS (1-indexed).
+        end_line: Linha final no arquivo SAS (1-indexed).
+        construct_type: Tipo de construto (ex: "PROC_SQL", "DATA_STEP").
+    """
+
+    job_name: str
+    start_line: int
+    end_line: int
+    construct_type: str
+
+
 class JobStatus(StrEnum):
     """Status de um job no pipeline de migração."""
 
