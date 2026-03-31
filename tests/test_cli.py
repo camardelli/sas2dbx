@@ -170,3 +170,149 @@ class TestAnalyzeCli:
     def test_analyze_nonexistent_dir_exits_1(self) -> None:
         result = runner.invoke(app, ["analyze", "/nao/existe/xyz"])
         assert result.exit_code == 1
+
+
+# ---------------------------------------------------------------------------
+# document (Sprint 6 — Story 6.4)
+# ---------------------------------------------------------------------------
+
+
+_STUB_DOC_RESPONSE = """## Objetivo
+Job de teste para validação do CLI.
+
+## Datasets
+| Dataset | Tipo |
+|---------|------|
+| WORK.OUT | Output |
+
+## Transformações
+1. DATA step simples
+
+## Riscos e observações
+Nenhum."""
+
+
+class TestDocumentCli:
+    def test_document_help(self) -> None:
+        result = runner.invoke(app, ["document", "--help"])
+        assert result.exit_code == 0
+        assert "format" in result.output.lower() or "output" in result.output.lower()
+
+    def test_document_no_api_key_exits_1(self, tmp_path: Path) -> None:
+        """Sem ANTHROPIC_API_KEY deve sair com código 1."""
+        import os
+        env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+        result = runner.invoke(
+            app,
+            ["document", str(FIXTURES_DIR), "--output", str(tmp_path)],
+            env=env,
+        )
+        assert result.exit_code == 1
+        assert "ANTHROPIC_API_KEY" in result.output
+
+    def test_document_invalid_format_exits_1(self, tmp_path: Path) -> None:
+        result = runner.invoke(app, [
+            "document", str(FIXTURES_DIR),
+            "--output", str(tmp_path),
+            "--format", "csv",
+            "--api-key", "sk-fake",
+        ])
+        assert result.exit_code == 1
+        assert "format" in result.output.lower()
+
+    def test_document_nonexistent_dir_exits_1(self, tmp_path: Path) -> None:
+        result = runner.invoke(app, [
+            "document", "/nao/existe/xyz",
+            "--output", str(tmp_path),
+            "--api-key", "sk-fake",
+        ])
+        assert result.exit_code == 1
+
+    def test_document_md_format_creates_files(self, tmp_path: Path, monkeypatch) -> None:
+        """--format md: cria README.md por job e ARCHITECTURE.md (stub LLM)."""
+        from sas2dbx.transpile.llm.client import LLMResponse
+
+        async def _stub_complete(self_inner, prompt: str) -> LLMResponse:
+            return LLMResponse(
+                content=_STUB_DOC_RESPONSE,
+                provider_used="stub",
+                tokens_used=100,
+                latency_ms=1.0,
+            )
+
+        from sas2dbx.transpile.llm import client as llm_module
+        monkeypatch.setattr(llm_module.LLMClient, "complete", _stub_complete)
+
+        result = runner.invoke(app, [
+            "document", str(FIXTURES_DIR),
+            "--output", str(tmp_path),
+            "--format", "md",
+            "--api-key", "sk-fake",
+        ])
+        assert result.exit_code == 0, result.output
+        assert (tmp_path / "ARCHITECTURE.md").exists()
+        # Deve criar pelo menos um README de job
+        job_files = list((tmp_path / "jobs").glob("*_README.md"))
+        assert len(job_files) >= 1
+
+    def test_document_html_format_creates_explorer(self, tmp_path: Path, monkeypatch) -> None:
+        """--format html: cria architecture_explorer.html."""
+        from sas2dbx.transpile.llm.client import LLMResponse
+
+        async def _stub_complete(self_inner, prompt: str) -> LLMResponse:
+            return LLMResponse(
+                content=_STUB_DOC_RESPONSE,
+                provider_used="stub",
+                tokens_used=100,
+                latency_ms=1.0,
+            )
+
+        from sas2dbx.transpile.llm import client as llm_module
+        monkeypatch.setattr(llm_module.LLMClient, "complete", _stub_complete)
+
+        result = runner.invoke(app, [
+            "document", str(FIXTURES_DIR),
+            "--output", str(tmp_path),
+            "--format", "html",
+            "--api-key", "sk-fake",
+        ])
+        assert result.exit_code == 0, result.output
+        assert (tmp_path / "architecture_explorer.html").exists()
+
+    def test_document_all_format_creates_all_artifacts(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """--format all: cria md + html."""
+        from sas2dbx.transpile.llm.client import LLMResponse
+
+        async def _stub_complete(self_inner, prompt: str) -> LLMResponse:
+            return LLMResponse(
+                content=_STUB_DOC_RESPONSE,
+                provider_used="stub",
+                tokens_used=100,
+                latency_ms=1.0,
+            )
+
+        from sas2dbx.transpile.llm import client as llm_module
+        monkeypatch.setattr(llm_module.LLMClient, "complete", _stub_complete)
+
+        result = runner.invoke(app, [
+            "document", str(FIXTURES_DIR),
+            "--output", str(tmp_path),
+            "--format", "all",
+            "--api-key", "sk-fake",
+        ])
+        assert result.exit_code == 0, result.output
+        assert (tmp_path / "ARCHITECTURE.md").exists()
+        assert (tmp_path / "architecture_explorer.html").exists()
+
+    def test_document_empty_dir_exits_0(self, tmp_path: Path) -> None:
+        """Diretório sem .sas: deve sair com código 0 (sem trabalho)."""
+        empty_dir = tmp_path / "empty"
+        empty_dir.mkdir()
+        result = runner.invoke(app, [
+            "document", str(empty_dir),
+            "--output", str(tmp_path / "out"),
+            "--api-key", "sk-fake",
+        ])
+        assert result.exit_code == 0

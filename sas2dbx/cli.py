@@ -397,6 +397,175 @@ def analyze(
 
 
 # ---------------------------------------------------------------------------
+# sas2dbx document
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def document(
+    source_dir: Path = typer.Argument(..., help="Diretório com arquivos .sas"),
+    output: Path = typer.Option(
+        Path("./docs"), "--output", "-o", help="Diretório de saída para documentação"
+    ),
+    fmt: str = typer.Option(
+        "all", "--format", "-f", help="Formato de saída: md | html | all"
+    ),
+    provider: str = typer.Option(
+        "anthropic", "--provider", help="LLM provider: anthropic | khon"
+    ),
+    model: str = typer.Option(
+        "claude-sonnet-4-6", "--model", help="Modelo LLM"
+    ),
+    api_key: str | None = typer.Option(
+        None, "--api-key", envvar="ANTHROPIC_API_KEY", help="Chave API Anthropic"
+    ),
+    recursive: bool = typer.Option(True, "--recursive/--no-recursive", help="Busca recursiva"),
+) -> None:
+    """Gera documentação técnica (README.md por job + ARCHITECTURE.md + Explorer HTML)."""
+    import os
+
+    from sas2dbx.analyze.classifier import classify_block
+    from sas2dbx.analyze.dependency import DependencyAnalyzer
+    from sas2dbx.analyze.parser import BlockDeps, extract_block_deps
+    from sas2dbx.document.architecture import ArchitectureDocumentor
+    from sas2dbx.document.job_doc import JobDocumentor
+    from sas2dbx.document.visual import ArchitectureExplorer
+    from sas2dbx.ingest.reader import read_sas_file, split_blocks
+    from sas2dbx.ingest.scanner import scan_directory
+    from sas2dbx.models.migration_result import MigrationResult
+    from sas2dbx.transpile.llm.client import LLMClient, LLMConfig
+
+    if fmt not in ("md", "html", "all"):
+        console.print(
+            f"[red]Erro: --format deve ser 'md', 'html' ou 'all' (recebido: '{fmt}')[/red]"
+        )
+        raise typer.Exit(1)
+
+    # Resolve API key
+    resolved_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+    if not resolved_key:
+        console.print(
+            "[red]Erro: ANTHROPIC_API_KEY não definida. "
+            "Use --api-key ou export ANTHROPIC_API_KEY=sk-...[/red]"
+        )
+        raise typer.Exit(1)
+
+    # 1 — Scan
+    try:
+        sas_files = scan_directory(source_dir, recursive=recursive)
+    except FileNotFoundError as exc:
+        console.print(f"[red]Erro: {exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    if not sas_files:
+        console.print(f"[yellow]Nenhum arquivo .sas encontrado em {source_dir}[/yellow]")
+        raise typer.Exit(0)
+
+    console.print(f"\nDocumentando [bold]{len(sas_files)}[/bold] job(s)...\n")
+
+    # 2 — Analyze: build dependency graph + classifications per job
+    autoexec_path = source_dir / "autoexec.sas" if source_dir.is_dir() else None
+    analyzer = DependencyAnalyzer(
+        autoexec_path=autoexec_path if (autoexec_path and autoexec_path.exists()) else None,
+    )
+    graph = analyzer.analyze(sas_files)
+
+    jobs_code: dict[str, str] = {}
+    jobs_block_deps: dict[str, list[BlockDeps]] = {}
+    jobs_classifications: dict[str, list] = {}
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("{task.completed}/{task.total}"),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        parse_task = progress.add_task("Analisando código...", total=len(sas_files))
+        for sas_file in sas_files:
+            code, _ = read_sas_file(sas_file.path)
+            job_name = sas_file.path.stem
+            jobs_code[job_name] = code
+            blocks = split_blocks(code, source_file=sas_file.path)
+            jobs_block_deps[job_name] = [extract_block_deps(b) for b in blocks]
+            jobs_classifications[job_name] = [classify_block(b.raw_code) for b in blocks]
+            progress.advance(parse_task)
+
+    # 3 — JobDocumentor (LLM) per job
+    llm_config = LLMConfig(provider=provider, model=model, api_key=resolved_key)
+    llm_client = LLMClient(llm_config)
+    doc_engine = JobDocumentor(llm_client=llm_client)
+
+    jobs_dir = output / "jobs"
+    job_docs: dict[str, str] = {}
+    results: list[MigrationResult] = []
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("{task.completed}/{task.total}"),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        doc_task = progress.add_task("Gerando documentação por job...", total=len(sas_files))
+        for sas_file in sas_files:
+            job_name = sas_file.path.stem
+            try:
+                result = doc_engine.generate_doc_sync(
+                    job_name=job_name,
+                    sas_code=jobs_code[job_name],
+                    block_deps=jobs_block_deps.get(job_name, []),
+                    classification_results=jobs_classifications.get(job_name, []),
+                    graph=graph,
+                )
+                if fmt in ("md", "all"):
+                    doc_engine.write_doc(result, jobs_dir)
+                job_docs[job_name] = result.content
+                from sas2dbx.models.migration_result import JobStatus
+                results.append(
+                    MigrationResult(
+                        job_id=job_name,
+                        status=JobStatus.DONE,
+                        confidence=1.0,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                console.print(f"  [red]✗[/red] {job_name}: {exc}")
+                from sas2dbx.models.migration_result import JobStatus
+                results.append(
+                    MigrationResult(
+                        job_id=job_name,
+                        status=JobStatus.FAILED,
+                        error=str(exc),
+                    )
+                )
+            progress.advance(doc_task)
+
+    # 4 — ArchitectureDocumentor (no LLM)
+    if fmt in ("md", "all"):
+        arch_doc = ArchitectureDocumentor()
+        arch_md = arch_doc.generate_architecture_md(graph, results, job_docs)
+        arch_path = arch_doc.write(arch_md, output)
+        console.print(f"[green]✓[/green] ARCHITECTURE.md → {arch_path}")
+
+    # 5 — ArchitectureExplorer HTML
+    if fmt in ("html", "all"):
+        explorer = ArchitectureExplorer(project_name=source_dir.name)
+        html = explorer.generate_html(graph, results, job_docs)
+        html_path = explorer.write(html, output)
+        console.print(f"[green]✓[/green] architecture_explorer.html → {html_path}")
+
+    done = sum(1 for r in results if r.status.value == "done")
+    failed = len(results) - done
+    console.print(
+        f"\nConcluído: [green]{done} jobs documentados[/green]"
+        + (f" · [red]{failed} com erro[/red]" if failed else "")
+    )
+
+
+# ---------------------------------------------------------------------------
 # sas2dbx status
 # ---------------------------------------------------------------------------
 
