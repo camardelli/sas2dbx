@@ -30,6 +30,11 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.4",
 ]
+web = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "python-multipart>=0.0.9",
+]
 
 [project.scripts]
 sas2dbx = "sas2dbx.cli:app"

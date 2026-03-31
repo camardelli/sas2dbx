@@ -565,6 +565,44 @@ def document(
 
 
 @app.command()
+def serve(
+    port: int = typer.Option(8000, "--port", "-p", help="Porta TCP do servidor"),
+    work_dir: str = typer.Option(
+        "./sas2dbx_work", "--work-dir", help="Diretório de trabalho para migrações"
+    ),
+    reload: bool = typer.Option(False, "--reload", help="Auto-reload (apenas dev)"),
+) -> None:
+    """Inicia o servidor web para o piloto SKY (FastAPI + uvicorn)."""
+    try:
+        import uvicorn
+    except ImportError:
+        console.print(
+            "[red]Erro: dependências web não instaladas. "
+            "Execute: pip install sas2dbx[web][/red]"
+        )
+        raise typer.Exit(1) from None
+
+    console.print(
+        f"[bold]SAS2DBX Web[/bold] iniciando na porta [cyan]{port}[/cyan] "
+        f"— work-dir: [cyan]{work_dir}[/cyan]"
+    )
+    console.print(f"  API docs: [link]http://localhost:{port}/api/docs[/link]")
+    console.print("  Ctrl+C para encerrar\n")
+
+    import os
+    os.environ.setdefault("SAS2DBX_WORK_DIR", work_dir)
+
+    uvicorn.run(
+        "sas2dbx.web.app:create_app",
+        factory=True,
+        host="0.0.0.0",
+        port=port,
+        reload=reload,
+        log_level="info",
+    )
+
+
+@app.command()
 def status(
     output_dir: Path = typer.Argument(..., help="Diretório de saída com .sas2dbx_state.json"),
 ) -> None:
