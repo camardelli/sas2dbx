@@ -186,3 +186,54 @@ class TestGetCustom:
     def test_returns_empty_dict_for_missing_file(self, tmp_path: Path) -> None:
         store = KnowledgeStore(base_path=tmp_path)
         assert store.get_custom("nonexistent") == {}
+
+
+# ---------------------------------------------------------------------------
+# Cache em memória
+# ---------------------------------------------------------------------------
+
+class TestMappingCache:
+    def test_second_lookup_uses_cache(self, knowledge_dir: Path) -> None:
+        """Segunda chamada de lookup_function não relê o arquivo do disco."""
+        from unittest.mock import patch
+
+        store = KnowledgeStore(base_path=knowledge_dir)
+
+        # Primeira chamada preenche o cache
+        result1 = store.lookup_function("INTCK")
+
+        # Patch open — não deve ser chamado na segunda vez para o mesmo arquivo
+        with patch("builtins.open") as mock_open:
+            result2 = store.lookup_function("INTCK")
+            mock_open.assert_not_called()
+
+        assert result1 == result2
+
+    def test_different_keys_same_file_uses_cache(self, knowledge_dir: Path) -> None:
+        """Lookup de chave diferente no mesmo arquivo usa cache (não relê disco)."""
+        from unittest.mock import patch
+
+        store = KnowledgeStore(base_path=knowledge_dir)
+        # Preenche cache para o functions_map
+        store.lookup_function("INTCK")
+
+        with patch("builtins.open") as mock_open:
+            store.lookup_function("SUBSTR")
+            mock_open.assert_not_called()
+
+    def test_invalidate_cache_forces_reload(self, knowledge_dir: Path) -> None:
+        """invalidate_cache() faz próximo lookup reler do disco."""
+        store = KnowledgeStore(base_path=knowledge_dir)
+        store.lookup_function("INTCK")
+        assert len(store._cache) > 0
+
+        store.invalidate_cache()
+        assert len(store._cache) == 0
+
+    def test_invalidate_cache_returns_correct_data(self, knowledge_dir: Path) -> None:
+        """Após invalidate_cache(), lookup retorna dados corretos."""
+        store = KnowledgeStore(base_path=knowledge_dir)
+        result_before = store.lookup_function("INTCK")
+        store.invalidate_cache()
+        result_after = store.lookup_function("INTCK")
+        assert result_before == result_after

@@ -1,0 +1,318 @@
+# SAS Functions → PySpark mappings (curadoria manual)
+# Schema: NOME: {pyspark, notes, confidence, variants (opcional)}
+# NUNCA sobrescrito por build-mappings — curated/ tem precedência absoluta
+
+# ---------------------------------------------------------------------------
+# String Functions
+# ---------------------------------------------------------------------------
+
+SUBSTR:
+  pyspark: "substring({col}, {pos}, {len})"
+  notes: "SAS e PySpark são ambos 1-indexed — sem ajuste necessário. Sem len = até o fim: substring(col, pos)."
+  confidence: 0.95
+
+SCAN:
+  pyspark: "split({col}, {delimiter})[{n} - 1]"
+  notes: "SAS SCAN é 1-indexed, array PySpark é 0-indexed — subtrair 1 do índice. SCAN com n negativo conta da direita (sem equivalente direto)."
+  confidence: 0.85
+
+CATX:
+  pyspark: "concat_ws({delimiter}, trim({arg1}), trim({arg2}))"
+  notes: "CATX remove leading/trailing spaces de cada argumento. Usar trim() em cada coluna antes do concat_ws()."
+  confidence: 0.95
+
+CATS:
+  pyspark: "concat(trim({arg1}), trim({arg2}))"
+  notes: "CATS concatena sem separador removendo espaços de cada argumento. concat(trim(col1), trim(col2)) é equivalente."
+  confidence: 0.85
+
+CAT:
+  pyspark: "concat({arg1}, {arg2})"
+  notes: "CAT não remove espaços — concat() é equivalente direto."
+  confidence: 0.95
+
+COMPRESS:
+  pyspark: "regexp_replace({col}, ' ', '')"
+  notes: "Sem segundo arg = remove espaços: regexp_replace(col, ' ', ''). Modifier kd = manter dígitos: regexp_replace(col, '[^0-9]', ''). Modifier ka = manter letras: regexp_replace(col, '[^a-zA-Z]', ''). Modifier kp = manter printáveis."
+  confidence: 0.8
+
+STRIP:
+  pyspark: "trim({col})"
+  notes: "STRIP remove leading e trailing blanks — trim() é equivalente exato."
+  confidence: 1.0
+
+TRIM:
+  pyspark: "rtrim({col})"
+  notes: "TRIM SAS remove apenas trailing blanks (diferente de STRIP). Usar rtrim(), não trim()."
+  confidence: 0.95
+
+LEFT:
+  pyspark: "ltrim({col})"
+  notes: "LEFT SAS remove leading blanks — ltrim() é equivalente."
+  confidence: 0.95
+
+UPCASE:
+  pyspark: "upper({col})"
+  notes: "Equivalente direto."
+  confidence: 1.0
+
+LOWCASE:
+  pyspark: "lower({col})"
+  notes: "Equivalente direto."
+  confidence: 1.0
+
+PROPCASE:
+  pyspark: "initcap({col})"
+  notes: "initcap capitaliza após qualquer caractere não-alfa. SAS PROPCASE aceita delimiters customizados — para comportamento idêntico usar UDF."
+  confidence: 0.8
+
+TRANWRD:
+  pyspark: "regexp_replace({col}, {target}, {replacement})"
+  notes: "TRANWRD faz substituição de substring exata. regexp_replace usa regex — escapar metacaracteres no target."
+  confidence: 0.85
+
+INDEX:
+  pyspark: "locate({substring}, {col})"
+  notes: "Ambos retornam 0 se não encontrado, posição 1-indexed se encontrado. ATENÇÃO: locate() tem assinatura (substr, str) — ordem invertida em relação a INDEX(str, substr)."
+  confidence: 0.9
+
+FIND:
+  pyspark: "locate({substring}, {col}, {startpos})"
+  notes: "FIND tem modifiers (I=case-insensitive, R=reverse). Para case-insensitive: locate(lower(substr), lower(col)). Busca reversa: sem equivalente direto — usar UDF."
+  confidence: 0.75
+
+LENGTH:
+  pyspark: "length(rtrim({col}))"
+  notes: "SAS LENGTH retorna comprimento excluindo trailing blanks. PySpark length() inclui trailing spaces. Usar length(rtrim(col)) para equivalência."
+  confidence: 0.9
+
+REPEAT:
+  pyspark: "repeat({col}, {n} + 1)"
+  notes: "SAS REPEAT('ab', 2) = 'ababab' (repete n+1 vezes total). PySpark repeat('ab', 3) = 'ababab'. Portanto: repeat(col, sas_n + 1)."
+  confidence: 0.9
+
+REVERSE:
+  pyspark: "reverse({col})"
+  notes: "Equivalente direto."
+  confidence: 1.0
+
+TRANSLATE:
+  pyspark: "translate({col}, {to_chars}, {from_chars})"
+  notes: "PySpark translate(srcCol, matching, replace) — mesma semântica. Ordem SAS: TRANSLATE(str, to, from). Ordem PySpark: translate(col, from_chars, to_chars). ATENÇÃO: ordem dos argumentos 2 e 3 é inversa."
+  confidence: 0.85
+
+# ---------------------------------------------------------------------------
+# Numeric Functions
+# ---------------------------------------------------------------------------
+
+ABS:
+  pyspark: "abs({col})"
+  notes: "Equivalente direto."
+  confidence: 1.0
+
+CEIL:
+  pyspark: "ceil({col})"
+  notes: "Equivalente direto."
+  confidence: 1.0
+
+FLOOR:
+  pyspark: "floor({col})"
+  notes: "Equivalente direto."
+  confidence: 1.0
+
+ROUND:
+  pyspark: "round({col}, {decimals})"
+  notes: "SAS ROUND(x, nearest) onde nearest=0.01 = 2 casas. Conversão: decimals = -log10(nearest). SAS ROUND sem segundo arg = inteiro → round(col, 0)."
+  confidence: 0.85
+
+MOD:
+  pyspark: "pmod({dividend}, {divisor})"
+  notes: "SAS MOD pode retornar negativo para dividendo negativo. pmod() sempre retorna não-negativo (modulo matemático). Para comportamento SAS: col1 % col2 em Spark SQL."
+  confidence: 0.85
+
+INT:
+  pyspark: "cast({col}, 'int')"
+  notes: "SAS INT trunca em direção a zero (não floor). PySpark cast('int') também trunca — comportamento equivalente."
+  confidence: 0.95
+
+SIGN:
+  pyspark: "signum({col})"
+  notes: "signum retorna -1.0, 0.0, ou 1.0."
+  confidence: 1.0
+
+SQRT:
+  pyspark: "sqrt({col})"
+  notes: "Equivalente direto."
+  confidence: 1.0
+
+LOG:
+  pyspark: "log({col})"
+  notes: "SAS LOG = logaritmo natural (base e). PySpark log(col) = logaritmo natural. Equivalente direto."
+  confidence: 1.0
+
+LOG10:
+  pyspark: "log10({col})"
+  notes: "Equivalente direto."
+  confidence: 1.0
+
+EXP:
+  pyspark: "exp({col})"
+  notes: "Equivalente direto."
+  confidence: 1.0
+
+MAX:
+  pyspark: "greatest({col1}, {col2})"
+  notes: "SAS MAX ignora missing values. PySpark greatest() retorna null se qualquer argumento é null. Para comportamento SAS: greatest(coalesce(col1, lit(float('-inf'))), coalesce(col2, lit(float('-inf'))))."
+  confidence: 0.75
+
+MIN:
+  pyspark: "least({col1}, {col2})"
+  notes: "Mesmo problema de nulls que MAX. Para comportamento SAS: least(coalesce(col1, lit(float('inf'))), coalesce(col2, lit(float('inf'))))."
+  confidence: 0.75
+
+SUM:
+  pyspark: "coalesce({col1}, lit(0)) + coalesce({col2}, lit(0))"
+  notes: "SAS SUM ignora missing (trata como 0). Para agregação: F.sum(col) ignora nulls por padrão — equivalente direto. Para expressão em linha: usar coalesce(col, lit(0)) por argumento."
+  confidence: 0.8
+
+MEAN:
+  pyspark: "F.mean({col})"
+  notes: "Para agregação: F.mean(col) ignora nulls — equivalente ao MEAN do SAS. Para múltiplos argumentos em linha: requer lógica custom com coalesce e contagem de não-nulos."
+  confidence: 0.7
+
+# ---------------------------------------------------------------------------
+# Date/Time Functions
+# ---------------------------------------------------------------------------
+
+INTCK:
+  pyspark: "months_between({enddate}, {startdate})"
+  notes: "ATENÇÃO: ordem dos argumentos INVERTIDA. SAS INTCK('MONTH', start, end) → PySpark months_between(end, start). INTCK conta cruzamentos de boundary, não duração exata. Para DAY é equivalente a datediff."
+  variants:
+    MONTH: "months_between({enddate}, {startdate})"
+    DAY: "datediff({enddate}, {startdate})"
+    YEAR: "floor(months_between({enddate}, {startdate}) / 12)"
+    WEEK: "floor(datediff({enddate}, {startdate}) / 7)"
+  confidence: 0.85
+
+INTNX:
+  pyspark: "add_months({startdate}, {n})"
+  notes: "Para intervalo MONTH. SAS INTNX('MONTH', date, n, alignment). Alignment (B/M/E/S) requer lógica adicional. Para DAY: date_add(date, n). Para YEAR: add_months(date, n*12)."
+  variants:
+    MONTH: "add_months({startdate}, {n})"
+    DAY: "date_add({startdate}, {n})"
+    YEAR: "add_months({startdate}, {n} * 12)"
+  confidence: 0.75
+
+DATEPART:
+  pyspark: "to_date({col})"
+  notes: "Extrai componente date de um datetime SAS. to_date() converte timestamp para date."
+  confidence: 0.95
+
+TIMEPART:
+  pyspark: "unix_timestamp({col}) % 86400"
+  notes: "Retorna segundos desde meia-noite. Sem equivalente direto. Para horas: (unix_timestamp(col) % 86400) / 3600."
+  confidence: 0.65
+
+TODAY:
+  pyspark: "current_date()"
+  notes: "Equivalente direto."
+  confidence: 1.0
+
+DATETIME:
+  pyspark: "current_timestamp()"
+  notes: "Equivalente direto."
+  confidence: 1.0
+
+MDY:
+  pyspark: "make_date({year}, {month}, {day})"
+  notes: "PySpark 3.3+: make_date(year, month, day). Para versões anteriores: to_date(concat_ws('-', year, lpad(month, 2, '0'), lpad(day, 2, '0')), 'yyyy-M-d')."
+  confidence: 0.9
+
+YEAR:
+  pyspark: "year({col})"
+  notes: "Equivalente direto."
+  confidence: 1.0
+
+MONTH:
+  pyspark: "month({col})"
+  notes: "Equivalente direto."
+  confidence: 1.0
+
+DAY:
+  pyspark: "dayofmonth({col})"
+  notes: "SAS DAY() = dia do mês. Usar dayofmonth(), não dayofweek() ou dayofyear()."
+  confidence: 1.0
+
+HOUR:
+  pyspark: "hour({col})"
+  notes: "Equivalente direto. Coluna deve ser timestamp."
+  confidence: 1.0
+
+MINUTE:
+  pyspark: "minute({col})"
+  notes: "Equivalente direto."
+  confidence: 1.0
+
+SECOND:
+  pyspark: "second({col})"
+  notes: "Equivalente direto."
+  confidence: 1.0
+
+PUT:
+  pyspark: "date_format({col}, {pattern})"
+  notes: "Depende do formato. Para datas: date_format(col, 'ddMMMyyyy').upper(). Para numérico: format_string. Para conversão tipo: cast. Ver formats_map para mapeamento completo de formatos SAS."
+  confidence: 0.6
+
+INPUT:
+  pyspark: "to_date({col}, {pattern})"
+  notes: "Para informats de data: to_date(col, pattern). Para datetime: to_timestamp(col, pattern). Para numérico: cast(col, DoubleType()). Ver informats_map para patterns."
+  confidence: 0.6
+
+DHMS:
+  pyspark: "make_timestamp(year({date}), month({date}), dayofmonth({date}), {hour}, {minute}, {second})"
+  notes: "SAS DHMS(date, hour, minute, second) cria datetime. Requer extrair componentes da date com year(), month(), dayofmonth()."
+  confidence: 0.7
+
+HMS:
+  pyspark: "{hour} * 3600 + {minute} * 60 + {second}"
+  notes: "SAS HMS retorna tempo em segundos. Sem equivalente direto em PySpark — calcular: h*3600 + m*60 + s."
+  confidence: 0.85
+
+# ---------------------------------------------------------------------------
+# Conditional / Missing
+# ---------------------------------------------------------------------------
+
+COALESCE:
+  pyspark: "coalesce({col1}, {col2})"
+  notes: "Equivalente direto. SAS COALESCE retorna primeiro valor não-missing numérico."
+  confidence: 1.0
+
+COALESCEC:
+  pyspark: "coalesce({col1}, {col2})"
+  notes: "COALESCEC é a versão character. PySpark coalesce() funciona para qualquer tipo."
+  confidence: 1.0
+
+IFN:
+  pyspark: "when({condition}, {true_val}).when({cond_col}.isNull(), {missing_val}).otherwise({false_val})"
+  notes: "IFN(cond, true, false, missing_if_cond_null). Quarto argumento para quando a condição avalia missing."
+  confidence: 0.8
+
+IFC:
+  pyspark: "when({condition}, {true_str}).when({cond_col}.isNull(), {missing_str}).otherwise({false_str})"
+  notes: "IFC é versão character de IFN — mesma lógica com strings."
+  confidence: 0.8
+
+MISSING:
+  pyspark: "{col}.isNull()"
+  notes: "Para numérico: col.isNull(). Para character: col.isNull() | (col == ''). SAS considera string vazia como missing para character."
+  confidence: 0.85
+
+NMISS:
+  pyspark: "when({col1}.isNull(), 1).otherwise(0) + when({col2}.isNull(), 1).otherwise(0)"
+  notes: "NMISS conta missing numéricos entre argumentos. Somar when().isNull() individuais."
+  confidence: 0.8
+
+CMISS:
+  pyspark: "when({col1}.isNull() | ({col1} == ''), 1).otherwise(0)"
+  notes: "CMISS conta missing character (null OU empty string). when(col.isNull() | (col == ''), 1).otherwise(0) por argumento."
+  confidence: 0.8

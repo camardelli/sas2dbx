@@ -1,0 +1,33 @@
+last_build: '2026-03-31T00:20:26.230193+00:00'
+mappings:
+  formats_map:
+    avg_confidence: 0.86
+    curated_entries: 20
+    generated_entries: 0
+    total_entries: 20
+  functions_map:
+    avg_confidence: 0.892
+    curated_entries: 58
+    generated_entries: 0
+    total_entries: 58
+  informats_map:
+    avg_confidence: 0.825
+    curated_entries: 10
+    generated_entries: 0
+    total_entries: 10
+  options_map:
+    avg_confidence: 0.857
+    curated_entries: 7
+    generated_entries: 0
+    total_entries: 7
+  proc_map:
+    avg_confidence: 0.595
+    curated_entries: 10
+    generated_entries: 0
+    total_entries: 10
+  sql_dialect_map:
+    avg_confidence: 0.0
+    curated_entries: 15
+    generated_entries: 0
+    total_entries: 15
+version: 1.0.0

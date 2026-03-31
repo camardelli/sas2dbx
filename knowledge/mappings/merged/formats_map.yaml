@@ -1,0 +1,103 @@
+$CHAR:
+  confidence: 0.85
+  notes: $CHARw. trunca string para w caracteres. substring(col, 1, w).
+  pattern: null
+  pyspark: substring({col}, 1, {width})
+BEST:
+  confidence: 0.6
+  notes: BEST. usa melhor representação numérica. cast para string é aproximação aceitável.
+  pattern: null
+  pyspark: cast({col}, 'string')
+COMMA:
+  confidence: 0.8
+  notes: COMMA. = 1,234.56. Decimais variam por COMMA8.2.
+  pattern: '#,##0.00'
+  pyspark: format_string('%,.2f', {col})
+DATE9:
+  confidence: 0.9
+  notes: DATE9. = 01JAN2025. date_format gera lowercase (01jan2025) — aplicar upper().
+  pattern: ddMMMyyyy
+  pyspark: upper(date_format({col}, 'ddMMMyyyy'))
+DATETIME20:
+  confidence: 0.85
+  notes: DATETIME20. = 01-JAN-2025 14:30:00. Ajustar case do mês.
+  pattern: dd-MMM-yyyy HH:mm:ss
+  pyspark: upper(date_format({col}, 'dd-MMM-yyyy HH:mm:ss'))
+DDMMYY10:
+  confidence: 0.95
+  notes: DDMMYY10. = 15/01/2025
+  pattern: dd/MM/yyyy
+  pyspark: date_format({col}, 'dd/MM/yyyy')
+DOLLAR:
+  confidence: 0.8
+  notes: DOLLAR. formata como $1,234.56. Número de casas decimais varia por DOLLAR8.2.
+  pattern: $#,##0.00
+  pyspark: format_string('$%,.2f', {col})
+E8601DA:
+  confidence: 0.95
+  notes: E8601DA. = ISO 8601 date. Equivalente a YYMMDD10.
+  pattern: yyyy-MM-dd
+  pyspark: date_format({col}, 'yyyy-MM-dd')
+E8601DT:
+  confidence: 0.95
+  notes: 'E8601DT. = ISO 8601 datetime: 2025-01-15T14:30:00'
+  pattern: yyyy-MM-dd'T'HH:mm:ss
+  pyspark: date_format({col}, "yyyy-MM-dd'T'HH:mm:ss")
+EURDFDE:
+  confidence: 0.85
+  notes: 'EURDFDE10. = formato europeu com ponto: 15.01.2025'
+  pattern: dd.MM.yyyy
+  pyspark: date_format({col}, 'dd.MM.yyyy')
+HHMM:
+  confidence: 0.9
+  notes: HHMM. = 14:30
+  pattern: HH:mm
+  pyspark: date_format({col}, 'HH:mm')
+MMDDYY10:
+  confidence: 0.95
+  notes: MMDDYY10. = 01/15/2025
+  pattern: MM/dd/yyyy
+  pyspark: date_format({col}, 'MM/dd/yyyy')
+MONYY:
+  confidence: 0.85
+  notes: MONYY. = JAN2025. date_format gera lowercase — aplicar upper().
+  pattern: MMMyyyy
+  pyspark: upper(date_format({col}, 'MMMyyyy'))
+NLDATE:
+  confidence: 0.7
+  notes: NLDATE. = 15 January 2025. Locale-dependent em SAS — PySpark usa locale do
+    JVM.
+  pattern: dd MMMM yyyy
+  pyspark: date_format({col}, 'dd MMMM yyyy')
+PERCENT:
+  confidence: 0.8
+  notes: 'PERCENT. = 15.3%. ATENÇÃO: valor SAS é fração (0.153) — multiplicar por
+    100.'
+  pattern: '%.1f%%'
+  pyspark: format_string('%.1f%%', {col} * 100)
+TIME8:
+  confidence: 0.9
+  notes: TIME8. = 14:30:00. Coluna deve ser timestamp.
+  pattern: HH:mm:ss
+  pyspark: date_format({col}, 'HH:mm:ss')
+WEEKDATE:
+  confidence: 0.8
+  notes: WEEKDATE. = Wednesday, January 15, 2025
+  pattern: EEEE, MMMM dd, yyyy
+  pyspark: date_format({col}, 'EEEE, MMMM dd, yyyy')
+YYMMDD10:
+  confidence: 0.95
+  notes: YYMMDD10. = 2025-01-15. ISO 8601 — equivalente direto.
+  pattern: yyyy-MM-dd
+  pyspark: date_format({col}, 'yyyy-MM-dd')
+YYMMDDN:
+  confidence: 0.95
+  notes: YYMMDDN8. = 20250115 (sem separadores).
+  pattern: yyyyMMdd
+  pyspark: date_format({col}, 'yyyyMMdd')
+Z.:
+  confidence: 0.9
+  notes: 'Z8. = número com zero-padding de 8 dígitos: lpad(cast(col, ''string''),
+    8, ''0'').'
+  pattern: zero-padded
+  pyspark: lpad(cast({col}, 'string'), {width}, '0')

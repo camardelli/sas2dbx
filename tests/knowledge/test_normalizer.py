@@ -184,3 +184,40 @@ class TestEdgeCases:
         second_run = _load_yaml(knowledge_dir / "mappings" / "merged" / "functions_map.yaml")
 
         assert first_run == second_run
+
+
+# ---------------------------------------------------------------------------
+# Manifest.yaml — G5
+# ---------------------------------------------------------------------------
+
+class TestManifest:
+    def test_build_mappings_creates_manifest(self, knowledge_dir: Path) -> None:
+        build_mappings(base_path=knowledge_dir)
+        assert (knowledge_dir / "manifest.yaml").exists()
+
+    def test_manifest_has_required_keys(self, knowledge_dir: Path) -> None:
+        build_mappings(base_path=knowledge_dir)
+        manifest = yaml.safe_load((knowledge_dir / "manifest.yaml").read_text())
+        assert "version" in manifest
+        assert "last_build" in manifest
+        assert "mappings" in manifest
+
+    def test_manifest_reflects_entry_counts(self, knowledge_dir: Path) -> None:
+        generated = knowledge_dir / "mappings" / "generated"
+        (generated / "functions_map.yaml").write_text(
+            yaml.dump({"A": {"pyspark": "a", "confidence": 0.9}, "B": {"pyspark": "b", "confidence": 0.8}}),
+            encoding="utf-8",
+        )
+        build_mappings(base_path=knowledge_dir)
+        manifest = yaml.safe_load((knowledge_dir / "manifest.yaml").read_text())
+        assert manifest["mappings"]["functions_map"]["total_entries"] == 2
+
+    def test_manifest_updated_on_rerun(self, knowledge_dir: Path) -> None:
+        """Re-run de build_mappings atualiza last_build."""
+        import time
+        build_mappings(base_path=knowledge_dir)
+        ts1 = yaml.safe_load((knowledge_dir / "manifest.yaml").read_text())["last_build"]
+        time.sleep(0.01)
+        build_mappings(base_path=knowledge_dir)
+        ts2 = yaml.safe_load((knowledge_dir / "manifest.yaml").read_text())["last_build"]
+        assert ts2 >= ts1

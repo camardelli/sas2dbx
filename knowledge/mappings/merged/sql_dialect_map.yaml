@@ -1,0 +1,77 @@
+BOOLEAN_COMPARISON:
+  notes: SAS usa 0/1 para booleano. Spark tem tipo BOOLEAN nativo. WHERE flag é sintaxe
+    válida se flag é BOOLEAN.
+  sas: WHERE flag = 1 (0/1 como booleano)
+  spark: WHERE flag = TRUE ou WHERE flag = 1 (ambos funcionam)
+CALCULATED:
+  notes: CALCULATED não existe em Spark SQL. Usar CTE (WITH) ou subquery para referenciar
+    alias calculado no mesmo SELECT.
+  sas: SELECT *, (col1 + col2) AS total, CALCULATED total * 0.1 AS tax FROM table
+  spark: WITH t AS (SELECT *, col1+col2 AS total FROM table) SELECT *, total*0.1 AS
+    tax FROM t
+CASE_MISSING:
+  notes: SAS missing numérico = '.', character missing = ''. Em Spark SQL sempre usar
+    IS NULL / IS NOT NULL.
+  sas: WHERE col = . (numeric missing) ou WHERE col = '' (character missing)
+  spark: WHERE col IS NULL
+CATX_IN_SQL:
+  notes: CATX não existe em Spark SQL. CATX remove espaços dos argumentos — usar TRIM
+    em cada coluna antes do CONCAT_WS.
+  sas: CATX('-', col1, col2, col3)
+  spark: CONCAT_WS('-', TRIM(col1), TRIM(col2), TRIM(col3))
+COALESCE_EMPTY_STRING:
+  notes: 'Semânticas diferentes: SAS character missing = string vazia. Spark NULL
+    ≠ ''''. Verificar se a lógica de negócio requer tratamento de '''' como missing.'
+  sas: COALESCE(col, '') — em SAS '' é missing para character
+  spark: COALESCE(col, '') — em Spark '' é string vazia, não NULL
+COMPRESS_IN_SQL:
+  notes: 'COMPRESS não existe em Spark SQL. Usar REGEXP_REPLACE para remoção de caracteres.
+    Para remover espaços: REGEXP_REPLACE(col, ''\\s'', '''').'
+  sas: COMPRESS(col, ' ')
+  spark: REGEXP_REPLACE(col, ' ', '')
+CREATE_TABLE_AS:
+  notes: 'Adicionar catalog.schema prefix conforme libnames.yaml. Usar OR REPLACE
+    para idempotência. No PySpark: df.write.mode(''overwrite'').saveAsTable(''catalog.schema.output'').'
+  sas: CREATE TABLE lib.output AS SELECT * FROM lib.input
+  spark: CREATE OR REPLACE TABLE catalog.schema.output AS SELECT * FROM catalog.schema.input
+DATEPART:
+  notes: DATEPART() não existe em Spark SQL. Usar CAST(col AS DATE) para extrair a
+    parte date de um timestamp.
+  sas: DATEPART(datetime_col)
+  spark: CAST(datetime_col AS DATE)
+DATETIME_LITERALS:
+  notes: SAS usa formato DDMONYYYYd. Spark usa ISO 8601. Converter literals manualmente
+    durante a transpilação.
+  sas: '''01JAN2025''d para date, ''01JAN2025:00:00:00''dt para datetime'
+  spark: DATE '2025-01-01' para date, TIMESTAMP '2025-01-01 00:00:00' para datetime
+GROUP_BY_ALIAS:
+  notes: Spark SQL não permite referenciar alias definido no SELECT dentro do GROUP
+    BY. Repetir a expressão inteira.
+  sas: SELECT upcase(name) AS name_upper, COUNT(*) AS n FROM t GROUP BY name_upper
+  spark: SELECT upper(name) AS name_upper, COUNT(*) AS n FROM t GROUP BY upper(name)
+HAVING_CALCULATED:
+  notes: 'Spark SQL não suporta CALCULATED em HAVING. Repetir a expressão de agregação
+    ou usar CTE: WITH t AS (...) SELECT * FROM t WHERE total > 1000.'
+  sas: GROUP BY dept HAVING CALCULATED total > 1000
+  spark: GROUP BY dept HAVING SUM(sal) > 1000
+INTO_MACRO_VARS:
+  notes: 'SAS INTO : armazena resultados em macro variables. No PySpark: n_rows =
+    df.count() ou spark.sql(''SELECT COUNT(*) FROM t'').collect()[0][0].'
+  sas: SELECT COUNT(*) INTO :n_rows FROM table
+  spark: SET n_rows = (SELECT COUNT(*) FROM table)
+MONOTONIC:
+  notes: 'MONOTONIC() retorna número sequencial não garantido. ROW_NUMBER() OVER é
+    a alternativa. No PySpark: F.monotonically_increasing_id() (não sequencial) ou
+    F.row_number().over(Window.orderBy(F.lit(1))).'
+  sas: SELECT MONOTONIC() AS row_num, * FROM table
+  spark: SELECT ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS row_num, * FROM table
+SUBSTR_IN_SQL:
+  notes: SUBSTR é alias de SUBSTRING em Spark SQL. Ambas funcionam. Mesma semântica
+    1-indexed.
+  sas: SUBSTR(col, 1, 3)
+  spark: SUBSTRING(col, 1, 3) ou SUBSTR(col, 1, 3)
+TRIM_IN_SQL:
+  notes: SAS TRIM = trailing only. Spark TRIM = ambos os lados. Usar RTRIM(col) em
+    Spark para equivalência com SAS TRIM.
+  sas: TRIM(col) remove trailing spaces
+  spark: RTRIM(col) remove trailing, TRIM(col) remove ambos os lados

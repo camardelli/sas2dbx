@@ -1,0 +1,66 @@
+# SAS PROCs — abordagem de transpilação (curadoria manual)
+# Schema: PROC_NAME: {approach, tier, notes, confidence, template_ref (opcional)}
+
+SQL:
+  approach: rule
+  tier: Tier.RULE
+  template_ref: rules/proc_sql.py
+  notes: "spark.sql() com adaptação de sintaxe. Adaptar CALCULATED, MONOTONIC, date literals, INTO. Ver sql_dialect_map para regras de diferença."
+  confidence: 0.9
+
+SORT:
+  approach: rule
+  tier: Tier.RULE
+  template_ref: rules/proc_sort.py
+  notes: "df.orderBy(). NODUPKEY → dropDuplicates(subset=[by_vars]). NODUPRECS → dropDuplicates(). BY DESC → orderBy(F.col('var').desc()). OUT= define dataset de saída."
+  confidence: 0.95
+
+EXPORT:
+  approach: rule
+  tier: Tier.RULE
+  template_ref: rules/proc_export.py
+  notes: "CSV: df.write.option('header', True).csv(path). DBMS=CSV → .csv(). OUTFILE define o destino. Excel (DBMS=XLSX) não suportado nativamente — requer openpyxl ou Databricks display()."
+  confidence: 0.85
+
+IMPORT:
+  approach: rule
+  tier: Tier.RULE
+  template_ref: rules/proc_import.py
+  notes: "CSV: spark.read.option('header', True).csv(path). DATAFILE define a origem. GETNAMES=YES → header=True. DBMS=CSV → .csv(). DELIMITER= → sep=."
+  confidence: 0.85
+
+MEANS:
+  approach: llm
+  tier: Tier.LLM
+  notes: "df.groupBy(class_vars).agg(F.count('var'), F.mean('var'), F.stddev('var'), F.min('var'), F.max('var')). Sem CLASS = agregação global: df.agg(). NWAY → apenas combinações completas (comportamento padrão do groupBy sem subtotais). OUTPUT OUT= com _TYPE_ e _FREQ_ requer lógica extra."
+  confidence: 0.8
+
+SUMMARY:
+  approach: llm
+  tier: Tier.LLM
+  notes: "Idêntico a PROC MEANS em termos de transpilação. Mesmo template e abordagem."
+  confidence: 0.8
+
+FREQ:
+  approach: llm
+  tier: Tier.LLM
+  notes: "df.groupBy(vars).count(). Para tabelas cruzadas (2+ variáveis): df.groupBy(var1, var2).count(). TABLES statement define as variáveis. NOCUM suprime cumulativo (sem efeito no PySpark)."
+  confidence: 0.8
+
+FORMAT:
+  approach: manual
+  tier: Tier.MANUAL
+  notes: "Formatos customizados não convertidos automaticamente. Sugestão: lookup table no Delta Lake (CREATE TABLE format_map) ou UDF Python. VALUE statement define mapeamentos discretos."
+  confidence: 0.0
+
+REPORT:
+  approach: manual
+  tier: Tier.MANUAL
+  notes: "PROC REPORT gera relatórios formatados. Sugestão: Databricks SQL Dashboard, display() com DataFrame formatado, ou pandas styling. Não há transpilação automática."
+  confidence: 0.0
+
+TABULATE:
+  approach: manual
+  tier: Tier.MANUAL
+  notes: "PROC TABULATE gera tabelas multidimensionais com subtotais. Sugestão: df.groupBy().pivot() para tabelas cruzadas simples, ou Databricks SQL com GROUPING SETS."
+  confidence: 0.0

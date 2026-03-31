@@ -1,0 +1,65 @@
+$CHAR:
+  confidence: 0.85
+  notes: $CHARw. lê exatamente w caracteres sem remoção de espaços.
+  pattern: null
+  pyspark: substring({col}, 1, {width})
+  sas_informat: $CHARw.
+ANYDTDTE:
+  confidence: 0.7
+  notes: 'ANYDTDTE. aceita muitos formatos de data automaticamente. to_date(col) sem
+    pattern tenta inferência. Se falhar, especificar pattern: to_date(col, ''ddMMMyyyy'').'
+  pattern: null
+  pyspark: to_date({col})
+  sas_informat: ANYDTDTE.
+ANYDTDTM:
+  confidence: 0.7
+  notes: ANYDTDTM. aceita muitos formatos de datetime. to_timestamp(col) sem pattern
+    tenta inferência.
+  pattern: null
+  pyspark: to_timestamp({col})
+  sas_informat: ANYDTDTM.
+BEST:
+  confidence: 0.8
+  notes: BEST. converte string para melhor representação numérica. cast para double
+    é equivalente geral.
+  pattern: null
+  pyspark: cast({col}, 'double')
+  sas_informat: BEST.
+COMMA:
+  confidence: 0.85
+  notes: COMMA. remove vírgulas e converte para numérico. regexp_replace remove separadores
+    de milhar.
+  pattern: null
+  pyspark: cast(regexp_replace({col}, '[,$]', ''), 'double')
+  sas_informat: COMMA.
+DATE:
+  confidence: 0.85
+  notes: DATE9. = 15JAN2025. PySpark pattern 'MMM' é case-sensitive — usar upper()
+    no valor antes de to_date.
+  pattern: ddMMMyyyy
+  pyspark: to_date(upper({col}), 'ddMMMyyyy')
+  sas_informat: DATE9.
+DATETIME:
+  confidence: 0.8
+  notes: DATETIME20. = 15-JAN-2025 14:30:00. Verificar separadores reais nos dados.
+  pattern: dd-MMM-yyyy HH:mm:ss
+  pyspark: to_timestamp({col}, 'dd-MMM-yyyy HH:mm:ss')
+  sas_informat: DATETIME20.
+DOLLAR:
+  confidence: 0.85
+  notes: DOLLAR. remove $ e vírgulas antes da conversão.
+  pattern: null
+  pyspark: cast(regexp_replace({col}, '[$,]', ''), 'double')
+  sas_informat: DOLLAR.
+MMDDYY:
+  confidence: 0.9
+  notes: MMDDYY10. = 01/15/2025 → to_date(col, 'MM/dd/yyyy')
+  pattern: MM/dd/yyyy
+  pyspark: to_date({col}, 'MM/dd/yyyy')
+  sas_informat: MMDDYY10.
+YYMMDD:
+  confidence: 0.95
+  notes: YYMMDD10. = 2025-01-15 → to_date(col, 'yyyy-MM-dd'). ISO 8601.
+  pattern: yyyy-MM-dd
+  pyspark: to_date({col}, 'yyyy-MM-dd')
+  sas_informat: YYMMDD10.

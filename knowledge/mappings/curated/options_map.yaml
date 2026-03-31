@@ -1,0 +1,44 @@
+# SAS Dataset Options → PySpark equivalentes (curadoria manual)
+# Schema: OPTION: {sas, pyspark, notes, confidence}
+
+WHERE:
+  sas: "DATA out; SET inp (WHERE=(age > 18)); RUN;"
+  pyspark: "df.filter('age > 18') ou df.where(F.col('age') > 18)"
+  notes: "WHERE= como dataset option aplica filtro no momento da leitura. .filter() ou .where() são equivalentes em PySpark."
+  confidence: 0.95
+
+KEEP:
+  sas: "DATA out; SET inp (KEEP=var1 var2 var3); RUN;"
+  pyspark: "df.select('var1', 'var2', 'var3')"
+  notes: "KEEP= retém apenas as variáveis listadas. .select() com os nomes das colunas."
+  confidence: 0.95
+
+DROP:
+  sas: "DATA out; SET inp (DROP=tmp_var aux_var); RUN;"
+  pyspark: "df.drop('tmp_var', 'aux_var')"
+  notes: "DROP= remove as variáveis listadas. .drop() com os nomes das colunas."
+  confidence: 0.95
+
+RENAME:
+  sas: "DATA out; SET inp (RENAME=(old_name=new_name dt=data)); RUN;"
+  pyspark: "df.withColumnRenamed('old_name', 'new_name').withColumnRenamed('dt', 'data')"
+  notes: "Para múltiplos renames: encadear withColumnRenamed. Alternativa: df.toDF(*new_names_list) para renomear todas as colunas de uma vez."
+  confidence: 0.95
+
+OBS:
+  sas: "DATA out; SET inp (OBS=1000); RUN;"
+  pyspark: "df.limit(1000)"
+  notes: "OBS=n processa no máximo n observações. .limit(n) é equivalente mas atenção: limit não garante ordem determinística."
+  confidence: 0.95
+
+FIRSTOBS:
+  sas: "DATA out; SET inp (FIRSTOBS=10 OBS=20); RUN;"
+  pyspark: "df_with_rownum.filter((F.col('row_num') >= 10) & (F.col('row_num') <= 20))"
+  notes: "FIRSTOBS= inicia do n-ésimo registro. Sem ordem definida não há equivalente direto. Requer ROW_NUMBER() OVER() para slice preciso. Exemplo: df.withColumn('row_num', F.row_number().over(Window.orderBy(F.lit(1))))."
+  confidence: 0.6
+
+"IN":
+  sas: "DATA out; MERGE a(IN=ina) b(IN=inb); BY id; IF ina AND inb; RUN;"
+  pyspark: "df_a.join(df_b, 'id', 'inner')"
+  notes: "IN= cria indicador booleano de participação no MERGE. IF ina AND inb = inner join. IF ina = left join (mantém todos de a). Traduzir lógica de join conforme combinação de flags IN."
+  confidence: 0.65

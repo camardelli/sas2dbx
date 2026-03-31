@@ -1,0 +1,72 @@
+# SAS Informats → PySpark to_date / to_timestamp patterns (curadoria manual)
+# Schema: INFORMAT_NAME: {sas_informat, pyspark, pattern, notes, confidence}
+
+ANYDTDTE:
+  sas_informat: ANYDTDTE.
+  pyspark: "to_date({col})"
+  pattern: null
+  notes: "ANYDTDTE. aceita muitos formatos de data automaticamente. to_date(col) sem pattern tenta inferência. Se falhar, especificar pattern: to_date(col, 'ddMMMyyyy')."
+  confidence: 0.7
+
+ANYDTDTM:
+  sas_informat: ANYDTDTM.
+  pyspark: "to_timestamp({col})"
+  pattern: null
+  notes: "ANYDTDTM. aceita muitos formatos de datetime. to_timestamp(col) sem pattern tenta inferência."
+  confidence: 0.7
+
+MMDDYY:
+  sas_informat: MMDDYY10.
+  pyspark: "to_date({col}, 'MM/dd/yyyy')"
+  pattern: MM/dd/yyyy
+  notes: "MMDDYY10. = 01/15/2025 → to_date(col, 'MM/dd/yyyy')"
+  confidence: 0.9
+
+YYMMDD:
+  sas_informat: YYMMDD10.
+  pyspark: "to_date({col}, 'yyyy-MM-dd')"
+  pattern: yyyy-MM-dd
+  notes: "YYMMDD10. = 2025-01-15 → to_date(col, 'yyyy-MM-dd'). ISO 8601."
+  confidence: 0.95
+
+DATE:
+  sas_informat: DATE9.
+  pyspark: "to_date(upper({col}), 'ddMMMyyyy')"
+  pattern: ddMMMyyyy
+  notes: "DATE9. = 15JAN2025. PySpark pattern 'MMM' é case-sensitive — usar upper() no valor antes de to_date."
+  confidence: 0.85
+
+DATETIME:
+  sas_informat: DATETIME20.
+  pyspark: "to_timestamp({col}, 'dd-MMM-yyyy HH:mm:ss')"
+  pattern: "dd-MMM-yyyy HH:mm:ss"
+  notes: "DATETIME20. = 15-JAN-2025 14:30:00. Verificar separadores reais nos dados."
+  confidence: 0.8
+
+COMMA:
+  sas_informat: COMMA.
+  pyspark: "cast(regexp_replace({col}, '[,$]', ''), 'double')"
+  pattern: null
+  notes: "COMMA. remove vírgulas e converte para numérico. regexp_replace remove separadores de milhar."
+  confidence: 0.85
+
+DOLLAR:
+  sas_informat: DOLLAR.
+  pyspark: "cast(regexp_replace({col}, '[$,]', ''), 'double')"
+  pattern: null
+  notes: "DOLLAR. remove $ e vírgulas antes da conversão."
+  confidence: 0.85
+
+BEST:
+  sas_informat: BEST.
+  pyspark: "cast({col}, 'double')"
+  pattern: null
+  notes: "BEST. converte string para melhor representação numérica. cast para double é equivalente geral."
+  confidence: 0.8
+
+"$CHAR":
+  sas_informat: $CHARw.
+  pyspark: "substring({col}, 1, {width})"
+  pattern: null
+  notes: "$CHARw. lê exatamente w caracteres sem remoção de espaços."
+  confidence: 0.85

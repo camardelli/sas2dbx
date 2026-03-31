@@ -1,0 +1,42 @@
+DROP:
+  confidence: 0.95
+  notes: DROP= remove as variáveis listadas. .drop() com os nomes das colunas.
+  pyspark: df.drop('tmp_var', 'aux_var')
+  sas: DATA out; SET inp (DROP=tmp_var aux_var); RUN;
+FIRSTOBS:
+  confidence: 0.6
+  notes: 'FIRSTOBS= inicia do n-ésimo registro. Sem ordem definida não há equivalente
+    direto. Requer ROW_NUMBER() OVER() para slice preciso. Exemplo: df.withColumn(''row_num'',
+    F.row_number().over(Window.orderBy(F.lit(1)))).'
+  pyspark: df_with_rownum.filter((F.col('row_num') >= 10) & (F.col('row_num') <= 20))
+  sas: DATA out; SET inp (FIRSTOBS=10 OBS=20); RUN;
+IN:
+  confidence: 0.65
+  notes: IN= cria indicador booleano de participação no MERGE. IF ina AND inb = inner
+    join. IF ina = left join (mantém todos de a). Traduzir lógica de join conforme
+    combinação de flags IN.
+  pyspark: df_a.join(df_b, 'id', 'inner')
+  sas: DATA out; MERGE a(IN=ina) b(IN=inb); BY id; IF ina AND inb; RUN;
+KEEP:
+  confidence: 0.95
+  notes: KEEP= retém apenas as variáveis listadas. .select() com os nomes das colunas.
+  pyspark: df.select('var1', 'var2', 'var3')
+  sas: DATA out; SET inp (KEEP=var1 var2 var3); RUN;
+OBS:
+  confidence: 0.95
+  notes: 'OBS=n processa no máximo n observações. .limit(n) é equivalente mas atenção:
+    limit não garante ordem determinística.'
+  pyspark: df.limit(1000)
+  sas: DATA out; SET inp (OBS=1000); RUN;
+RENAME:
+  confidence: 0.95
+  notes: 'Para múltiplos renames: encadear withColumnRenamed. Alternativa: df.toDF(*new_names_list)
+    para renomear todas as colunas de uma vez.'
+  pyspark: df.withColumnRenamed('old_name', 'new_name').withColumnRenamed('dt', 'data')
+  sas: DATA out; SET inp (RENAME=(old_name=new_name dt=data)); RUN;
+WHERE:
+  confidence: 0.95
+  notes: WHERE= como dataset option aplica filtro no momento da leitura. .filter()
+    ou .where() são equivalentes em PySpark.
+  pyspark: df.filter('age > 18') ou df.where(F.col('age') > 18)
+  sas: DATA out; SET inp (WHERE=(age > 18)); RUN;

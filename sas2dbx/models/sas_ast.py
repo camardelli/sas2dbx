@@ -14,6 +14,25 @@ class Tier(str, Enum):
     MANUAL = "manual"  # Tier 3 — flag manual, sem tentativa de transpilação automática
 
 
+@dataclass
+class ValidationReport:
+    """Relatório de validação do Knowledge Store.
+
+    Attributes:
+        is_valid: True se não há erros críticos (warnings não bloqueiam).
+        total_entries: Contagem de entradas por arquivo de mapping.
+        warnings: Avisos não-bloqueantes (ex: PROC sem .md correspondente).
+        coverage: Fração de entradas com confidence >= 0.7.
+        missing_references: PROCs/funções sem doc .md correspondente.
+    """
+
+    is_valid: bool
+    total_entries: dict[str, int]
+    warnings: list[str]
+    coverage: float
+    missing_references: list[str]
+
+
 @dataclass(frozen=True)
 class ClassificationResult:
     """Resultado da classificação de um bloco SAS.

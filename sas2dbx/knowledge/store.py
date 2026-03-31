@@ -31,6 +31,7 @@ class KnowledgeStore:
         self._sas_reference = self.base_path / "sas_reference"
         self._pyspark_reference = self.base_path / "pyspark_reference"
         self._custom = self.base_path / "custom"
+        self._cache: dict[str, dict] = {}  # lazy cache: path_str → parsed YAML
 
     # -------------------------------------------------------------------------
     # Lookup — deterministic, no LLM
@@ -116,9 +117,21 @@ class KnowledgeStore:
     # Internal
     # -------------------------------------------------------------------------
 
+    def _load_mapping(self, directory: Path, filename: str) -> dict[str, Any]:
+        """Carrega YAML com cache em memória. Lê do disco apenas na primeira chamada."""
+        cache_key = str(directory / filename)
+        if cache_key not in self._cache:
+            mapping_file = directory / filename
+            if mapping_file.exists():
+                with open(mapping_file, encoding="utf-8") as f:
+                    self._cache[cache_key] = yaml.safe_load(f) or {}
+            else:
+                self._cache[cache_key] = {}
+        return self._cache[cache_key]
+
     def _lookup_in_mapping(self, filename: str, key: str) -> dict[str, Any] | None:
         """
-        Lookup a key in a mapping YAML file.
+        Lookup a key in a mapping YAML file (com cache em memória).
 
         Search order:
           1. mappings/merged/  — ground truth (curated > generated)
@@ -127,11 +140,11 @@ class KnowledgeStore:
         Returns the entry dict, or None if not found in either.
         """
         for directory in (self._mappings_merged, self._mappings_generated):
-            mapping_file = directory / filename
-            if not mapping_file.exists():
-                continue
-            with open(mapping_file, encoding="utf-8") as f:
-                data = yaml.safe_load(f) or {}
+            data = self._load_mapping(directory, filename)
             if key in data:
                 return data[key]
         return None
+
+    def invalidate_cache(self) -> None:
+        """Limpa o cache em memória. Usar após build-mappings ou edição manual dos YAMLs."""
+        self._cache.clear()
