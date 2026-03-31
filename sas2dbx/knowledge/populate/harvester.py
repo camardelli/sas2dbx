@@ -19,6 +19,7 @@ class HarvestMode(StrEnum):
 
     OFFLINE = "offline"  # padrão — lê arquivos locais em raw_input/
     ONLINE = "online"    # opt-in — scraping externo (frágil)
+    LLM = "llm"          # usa conhecimento embutido do LLM via LLMHarvester
 
 
 class KnowledgeHarvester:
@@ -45,6 +46,7 @@ class KnowledgeHarvester:
         mode: HarvestMode = HarvestMode.OFFLINE,
         topics: list[str] | None = None,
         custom_path: str | Path | None = None,
+        llm_config: object | None = None,
     ) -> None:
         """
         Dispatch harvest para o handler correto por fonte.
@@ -52,10 +54,15 @@ class KnowledgeHarvester:
         Args:
             source: 'sas' | 'pyspark' | 'databricks' | 'custom'
             version: versão da fonte (ex: '9.4', '3.5')
-            mode: OFFLINE (default) ou ONLINE (opt-in)
+            mode: OFFLINE (default), ONLINE (opt-in) ou LLM
             topics: para databricks, lista de tópicos
             custom_path: para source='custom', path dos arquivos do cliente
+            llm_config: LLMConfig para mode=LLM (obrigatório nesse modo)
         """
+        if mode == HarvestMode.LLM:
+            self.harvest_llm(llm_config=llm_config)
+            return
+
         match source:
             case "sas":
                 self.harvest_sas(version=version or "9.4", mode=mode)
@@ -195,6 +202,40 @@ class KnowledgeHarvester:
                 copied += 1
             if copied == 0:
                 logger.warning("Nenhum arquivo .yaml encontrado em %s", input_path)
+
+    def harvest_llm(self, llm_config: object | None = None) -> None:
+        """
+        Popula mappings/generated/ usando o conhecimento embutido do LLM.
+
+        Não requer arquivos locais. Chama LLMHarvester para todos os 5 arquivos
+        de mapeamento (options_map.yaml excluído — muito específico de ambiente).
+
+        Args:
+            llm_config: LLMConfig com api_key e configurações do provider.
+                        Se None, levanta ValueError.
+
+        Raises:
+            ValueError: Se llm_config não for fornecido.
+        """
+        if llm_config is None:
+            raise ValueError(
+                "llm_config é obrigatório para --mode llm. "
+                "Forneça ANTHROPIC_API_KEY ou configure LLMConfig."
+            )
+        from sas2dbx.knowledge.populate.llm_harvester import LLMHarvester
+
+        harvester = LLMHarvester(base_path=self.base_path, llm_config=llm_config)
+        report = harvester.harvest_all_sync()
+
+        logger.info(
+            "LLM harvest concluído: %d arquivos, %d tokens, %d erros",
+            len(report.sources_processed),
+            report.tokens_used,
+            len(report.errors),
+        )
+        if report.errors:
+            for err in report.errors:
+                logger.warning("LLM harvest erro: %s", err)
 
     # -------------------------------------------------------------------------
     # Stubs internos — implementados em sas_docs.py, spark_docs.py, dbx_docs.py
