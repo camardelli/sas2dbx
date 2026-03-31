@@ -111,6 +111,9 @@ async def create_migration(
         file.filename,
     )
 
+    # Dispara pipeline em background (Story 7.2)
+    request.app.state.worker.start(migration_id)
+
     meta = storage.get_meta(migration_id)
     return MigrationResponse(
         migration_id=migration_id,

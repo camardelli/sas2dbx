@@ -41,8 +41,10 @@ def create_app(
     Returns:
         Instância FastAPI configurada e pronta para ser servida pelo uvicorn.
     """
+    from sas2dbx.transpile.llm.client import LLMConfig
     from sas2dbx.web.api.routes import router
     from sas2dbx.web.storage import MigrationStorage
+    from sas2dbx.web.worker import MigrationWorker
 
     resolved_max_mb = max_upload_mb or int(
         os.environ.get("MAX_UPLOAD_MB", str(_DEFAULT_MAX_UPLOAD_MB))
@@ -58,7 +60,10 @@ def create_app(
     )
 
     # Injeta dependências compartilhadas em app.state (R22, R19)
-    app.state.storage = MigrationStorage(Path(work_dir))
+    storage = MigrationStorage(Path(work_dir))
+    llm_config = LLMConfig(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+    app.state.storage = storage
+    app.state.worker = MigrationWorker(storage=storage, llm_config=llm_config)
     app.state.max_upload_bytes = resolved_max_mb * 1024 * 1024
     app.state.work_dir = Path(work_dir)
 

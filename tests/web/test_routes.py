@@ -17,6 +17,13 @@ from sas2dbx.web.app import create_app
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _no_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Impede o worker de iniciar threads durante testes de routes."""
+    from sas2dbx.web.worker import MigrationWorker
+    monkeypatch.setattr(MigrationWorker, "start", lambda self, mid: None)
+
+
 @pytest.fixture()
 def client(tmp_path: Path) -> TestClient:
     """TestClient com app apontando para tmp_path."""
