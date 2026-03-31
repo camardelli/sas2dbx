@@ -103,6 +103,114 @@ class TestHarvest:
 # validate
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# knowledge update
+# ---------------------------------------------------------------------------
+
+
+class TestKnowledgeUpdate:
+    def _populated_store(self, tmp_path: Path) -> Path:
+        """Cria um Knowledge Store mínimo com merged/ populado."""
+        merged = tmp_path / "mappings" / "merged"
+        merged.mkdir(parents=True)
+        for f in [
+            "functions_map.yaml", "formats_map.yaml", "informats_map.yaml",
+            "options_map.yaml", "proc_map.yaml", "sql_dialect_map.yaml",
+        ]:
+            (merged / f).write_text(yaml.dump({}), encoding="utf-8")
+        return tmp_path
+
+    def test_update_help(self) -> None:
+        result = runner.invoke(app, ["knowledge", "update", "--help"])
+        assert result.exit_code == 0
+        assert "update" in result.output.lower()
+
+    def test_update_invalid_mode_exits_1(self, tmp_path: Path) -> None:
+        result = runner.invoke(app, [
+            "knowledge", "update", "--mode", "invalid", "--base-path", str(tmp_path),
+        ])
+        assert result.exit_code == 1
+
+    def test_update_invalid_source_exits_1(self, tmp_path: Path) -> None:
+        result = runner.invoke(app, [
+            "knowledge", "update", "bogus_source", "--base-path", str(tmp_path),
+        ])
+        assert result.exit_code == 1
+
+    def test_update_custom_without_path_exits_1(self, tmp_path: Path) -> None:
+        result = runner.invoke(app, [
+            "knowledge", "update", "custom", "--base-path", str(tmp_path),
+        ])
+        assert result.exit_code == 1
+        assert "custom-path" in result.output.lower() or "custom_path" in result.output.lower()
+
+    def test_update_default_sources_runs(self, tmp_path: Path) -> None:
+        """Sem argumentos de fonte, processa sas+pyspark+databricks e exit 0."""
+        result = runner.invoke(app, [
+            "knowledge", "update",
+            "--base-path", str(tmp_path),
+            "--skip-validate",
+        ])
+        assert result.exit_code == 0, result.output
+
+    def test_update_single_source(self, tmp_path: Path) -> None:
+        result = runner.invoke(app, [
+            "knowledge", "update", "sas",
+            "--base-path", str(tmp_path),
+            "--skip-validate",
+        ])
+        assert result.exit_code == 0, result.output
+
+    def test_update_multiple_sources(self, tmp_path: Path) -> None:
+        result = runner.invoke(app, [
+            "knowledge", "update", "sas", "pyspark",
+            "--base-path", str(tmp_path),
+            "--skip-validate",
+        ])
+        assert result.exit_code == 0, result.output
+
+    def test_update_rebuilds_merged(self, tmp_path: Path) -> None:
+        """Após update, merged/ deve existir."""
+        runner.invoke(app, [
+            "knowledge", "update", "sas",
+            "--base-path", str(tmp_path),
+            "--skip-validate",
+        ])
+        assert (tmp_path / "mappings" / "merged").exists()
+
+    def test_update_with_validate_on_populated_store(self, tmp_path: Path) -> None:
+        """Com store populado e --skip-validate=False, deve validar e sair 0."""
+        self._populated_store(tmp_path)
+        result = runner.invoke(app, [
+            "knowledge", "update", "sas",
+            "--base-path", str(tmp_path),
+        ])
+        assert result.exit_code == 0, result.output
+
+    def test_update_output_shows_sources(self, tmp_path: Path) -> None:
+        """Output deve listar as fontes processadas."""
+        result = runner.invoke(app, [
+            "knowledge", "update", "sas", "pyspark",
+            "--base-path", str(tmp_path),
+            "--skip-validate",
+        ])
+        assert "sas" in result.output
+        assert "pyspark" in result.output
+
+    def test_update_custom_source_with_path(self, tmp_path: Path) -> None:
+        """Source custom com --custom-path válido deve rodar sem erro."""
+        custom_dir = tmp_path / "custom_input"
+        custom_dir.mkdir()
+        (custom_dir / "libnames.yaml").write_text(yaml.dump({}), encoding="utf-8")
+        result = runner.invoke(app, [
+            "knowledge", "update", "custom",
+            "--base-path", str(tmp_path),
+            "--custom-path", str(custom_dir),
+            "--skip-validate",
+        ])
+        assert result.exit_code == 0, result.output
+
+
 class TestValidateCli:
     def test_validate_empty_store_exits_1(self, tmp_path: Path) -> None:
         """Store vazio → validate retorna exit code 1."""

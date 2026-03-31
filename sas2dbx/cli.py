@@ -274,6 +274,152 @@ def validate(
 
 
 # ---------------------------------------------------------------------------
+# sas2dbx knowledge update
+# ---------------------------------------------------------------------------
+
+
+_ALL_SOURCES = ["sas", "pyspark", "databricks", "custom"]
+
+
+@knowledge_app.command()
+def update(
+    sources: list[str] = typer.Argument(
+        default=None,
+        help="Fontes a re-processar: sas pyspark databricks custom (padrão: todas exceto custom)",
+    ),
+    mode: str = typer.Option("offline", "--mode", "-m", help="offline | online"),
+    base_path: str = typer.Option("./knowledge", "--base-path", help="Raiz do Knowledge Store"),
+    custom_path: str = typer.Option(
+        None, "--custom-path", help="Path dos arquivos custom (obrigatório se 'custom' incluído)"
+    ),
+    skip_validate: bool = typer.Option(False, "--skip-validate", help="Pula validação final"),
+) -> None:
+    """Re-harvesta fontes selecionadas, reconstrói merged/ e valida.
+
+    Equivale a rodar harvest + build-mappings + validate em sequência.
+    Sem argumentos, re-processa sas, pyspark e databricks (omite custom).
+
+    Exemplos:
+      sas2dbx knowledge update                    # todas as fontes padrão
+      sas2dbx knowledge update sas pyspark        # só SAS e PySpark
+      sas2dbx knowledge update custom --custom-path ./env/
+    """
+    from sas2dbx.knowledge.populate.harvester import HarvestMode, KnowledgeHarvester
+    from sas2dbx.knowledge.populate.normalizer import build_mappings as _build
+    from sas2dbx.knowledge.validate import validate_knowledge_store
+
+    try:
+        harvest_mode = HarvestMode(mode)
+    except ValueError:
+        console.print(f"[red]Erro: mode inválido '{mode}'. Use 'offline' ou 'online'.[/red]")
+        raise typer.Exit(1) from None
+
+    # Padrão: todas exceto custom (requer --custom-path)
+    resolved_sources = list(sources) if sources else ["sas", "pyspark", "databricks"]
+
+    # Valida que custom_path foi fornecido se 'custom' está nas fontes
+    if "custom" in resolved_sources and not custom_path:
+        console.print(
+            "[red]Erro: --custom-path é obrigatório quando 'custom' está nas fontes.[/red]"
+        )
+        raise typer.Exit(1) from None
+
+    # Valida fontes
+    invalid = [s for s in resolved_sources if s not in _ALL_SOURCES]
+    if invalid:
+        console.print(f"[red]Fonte(s) inválida(s): {invalid}. Use: {_ALL_SOURCES}[/red]")
+        raise typer.Exit(1) from None
+
+    harvester = KnowledgeHarvester(base_path=base_path)
+    errors: list[str] = []
+
+    sources_str = ", ".join(resolved_sources)
+    console.print(f"\n[bold]Knowledge Store Update[/bold] — fontes: [cyan]{sources_str}[/cyan]\n")
+
+    # 1 — Harvest por fonte
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("{task.completed}/{task.total}"),
+        console=console,
+    ) as progress:
+        harvest_task = progress.add_task("Harvesting...", total=len(resolved_sources))
+
+        for source in resolved_sources:
+            progress.update(harvest_task, description=f"Harvest [cyan]{source}[/cyan]...")
+            try:
+                kwargs: dict = {"mode": harvest_mode}
+                if source == "custom":
+                    kwargs["custom_path"] = Path(custom_path)  # type: ignore[arg-type]
+                harvester.harvest(source=source, **kwargs)
+                console.print(f"  [green]✓[/green] {source}")
+            except Exception as exc:  # noqa: BLE001
+                console.print(f"  [red]✗[/red] {source}: {exc}")
+                errors.append(f"{source}: {exc}")
+            finally:
+                progress.advance(harvest_task)
+
+    if errors:
+        console.print(
+            f"\n[yellow]⚠ {len(errors)} fonte(s) com erro"
+            " — continuando para build-mappings.[/yellow]"
+        )
+
+    # 2 — build-mappings
+    console.print("\n[bold]Reconstruindo merged/...[/bold]")
+    try:
+        with console.status("Merging generated/ + curated/ → merged/..."):
+            mapping_results = _build(base_path=base_path)
+        total_entries = sum(mapping_results.values())
+        console.print(f"  [green]✓[/green] merged/ atualizado — {total_entries} entradas totais")
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"  [red]✗ Erro em build-mappings: {exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    # 3 — validate (opcional)
+    if not skip_validate:
+        console.print("\n[bold]Validando Knowledge Store...[/bold]")
+        try:
+            with console.status("Validando..."):
+                report = validate_knowledge_store(base_path=base_path)
+
+            coverage_color = "green" if report.coverage >= 0.8 else "yellow"
+            console.print(
+                f"  Cobertura: [{coverage_color}]{report.coverage:.0%}[/{coverage_color}]"
+                f"  |  Entradas: {sum(report.total_entries.values())}"
+            )
+
+            if report.warnings:
+                for w in report.warnings[:5]:  # máximo 5 warnings inline
+                    console.print(f"  [yellow]⚠[/yellow] {w}")
+                if len(report.warnings) > 5:
+                    extra = len(report.warnings) - 5
+                    console.print(
+                        f"  [yellow]... +{extra} warnings. "
+                        "Use `knowledge validate` para detalhes.[/yellow]"
+                    )
+
+            status_str = (
+                "[green]✓ VÁLIDO[/green]" if report.is_valid else "[yellow]⚠ COM WARNINGS[/yellow]"
+            )
+            console.print(f"  Status: {status_str}")
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"  [yellow]⚠ Validação falhou: {exc}[/yellow]")
+
+    # Sumário final
+    console.print()
+    if errors:
+        console.print(
+            f"[yellow]Update concluído com {len(errors)} erro(s) de harvest.[/yellow] "
+            "Verifique os logs acima."
+        )
+        raise typer.Exit(1)
+    else:
+        console.print("[green]✓ Knowledge Store atualizado com sucesso.[/green]")
+
+
+# ---------------------------------------------------------------------------
 # sas2dbx analyze
 # ---------------------------------------------------------------------------
 
