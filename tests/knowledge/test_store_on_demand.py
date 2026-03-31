@@ -10,7 +10,6 @@ import yaml
 from sas2dbx.knowledge.store import KnowledgeStore
 from sas2dbx.transpile.llm.client import LLMResponse
 
-
 # ---------------------------------------------------------------------------
 # Stubs de LLM
 # ---------------------------------------------------------------------------
@@ -77,10 +76,11 @@ class _SqlDialectStubLLMClient:
 class _FailingLLMClient:
     """Sempre retorna conteúdo que não é YAML válido."""
 
-    call_count = 0
+    def __init__(self) -> None:
+        self.call_count = 0
 
     async def complete(self, prompt: str) -> LLMResponse:
-        _FailingLLMClient.call_count += 1
+        self.call_count += 1
         return LLMResponse(
             content="isto não é yaml válido!!!! {{{",
             provider_used="stub",
@@ -191,22 +191,21 @@ class TestSecondCallUsesCache:
 
 class TestNegativeCachePreventsRetry:
     def test_failing_llm_tried_once_only(self, tmp_path: Path) -> None:
-        _FailingLLMClient.call_count = 0
         stub = _FailingLLMClient()
         ks = KnowledgeStore(base_path=tmp_path, llm_client=stub)
         r1 = ks.lookup_function_or_harvest("BADFUNC")
         r2 = ks.lookup_function_or_harvest("BADFUNC")
         assert r1 is None
         assert r2 is None
-        assert _FailingLLMClient.call_count == 1
+        assert stub.call_count == 1
 
     def test_different_functions_each_get_one_attempt(self, tmp_path: Path) -> None:
-        _FailingLLMClient.call_count = 0
-        ks = KnowledgeStore(base_path=tmp_path, llm_client=_FailingLLMClient())
+        stub = _FailingLLMClient()
+        ks = KnowledgeStore(base_path=tmp_path, llm_client=stub)
         ks.lookup_function_or_harvest("FUNCA")
         ks.lookup_function_or_harvest("FUNCB")
         ks.lookup_function_or_harvest("FUNCA")  # cache de negativa
-        assert _FailingLLMClient.call_count == 2  # FUNCA + FUNCB, mas não terceira
+        assert stub.call_count == 2  # FUNCA + FUNCB, mas não terceira
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +241,10 @@ class TestCuratedNotModified:
         curated = tmp_path / "mappings" / "curated"
         curated.mkdir(parents=True)
         curated_file = curated / "functions_map.yaml"
-        curated_file.write_text(yaml.dump({"EXISTING": {"pyspark": "x", "notes": "y", "confidence": 0.9}}), encoding="utf-8")
+        curated_file.write_text(
+            yaml.dump({"EXISTING": {"pyspark": "x", "notes": "y", "confidence": 0.9}}),
+            encoding="utf-8",
+        )
         original = curated_file.read_text()
 
         stub = _StubLLMClient()
@@ -281,8 +283,6 @@ class TestAppendPreservesExisting:
             encoding="utf-8",
         )
 
-        stub = _StubLLMClient()
-        ks = KnowledgeStore(base_path=tmp_path, llm_client=stub)
         # TESTFUNC está em generated mas não em merged → lookup_function retorna do generated
         # Portanto lookup_function_or_harvest vai retornar o old_value sem chamar LLM
         ks_no_cache = KnowledgeStore(base_path=tmp_path)
@@ -372,7 +372,6 @@ class TestLookupFormatOrHarvest:
 class TestNegativeCacheIsolation:
     def test_negative_cache_per_category(self, tmp_path: Path) -> None:
         """Cache de negativas é por category:key, não só por key."""
-        _FailingLLMClient.call_count = 0
         stub = _FailingLLMClient()
         ks = KnowledgeStore(base_path=tmp_path, llm_client=stub)
 
@@ -381,4 +380,4 @@ class TestNegativeCacheIsolation:
         ks.lookup_proc_or_harvest("FUNC1")
 
         # Deve ter tentado 2 vezes (uma por categoria)
-        assert _FailingLLMClient.call_count == 2
+        assert stub.call_count == 2

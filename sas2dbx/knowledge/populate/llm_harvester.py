@@ -13,6 +13,7 @@ Arquitectura aprovada em revisão @architect:
 from __future__ import annotations
 
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,6 +21,37 @@ from pathlib import Path
 import yaml
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Helper — execução síncrona segura em qualquer contexto (M3)
+# ---------------------------------------------------------------------------
+
+def _run_sync(coro: object) -> object:
+    """Executa uma coroutine de forma síncrona, seguro dentro ou fora de loop async.
+
+    - Sem loop em execução: usa asyncio.run() diretamente.
+    - Com loop em execução (FastAPI/uvicorn): delega para ThreadPoolExecutor
+      isolado para evitar RuntimeError de loop aninhado.
+
+    Args:
+        coro: Coroutine a executar.
+
+    Returns:
+        Resultado da coroutine.
+    """
+    import asyncio
+    import concurrent.futures
+
+    try:
+        asyncio.get_running_loop()
+        # Já dentro de um loop — executa em thread separada com seu próprio loop
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, coro).result()
+    except RuntimeError:
+        # Sem loop em execução — safe to use asyncio.run()
+        return asyncio.run(coro)
+
 
 # Arquivos que o LLM harvest popula (C4: options_map.yaml excluído)
 _LLM_TARGET_FILES = [
@@ -30,9 +62,8 @@ _LLM_TARGET_FILES = [
     "sql_dialect_map.yaml",
 ]
 
-# Campos obrigatórios e opcionais por entrada de mapeamento
+# Campos obrigatórios por entrada de mapeamento
 _REQUIRED_FIELDS = {"pyspark", "notes", "confidence"}
-_OPTIONAL_FIELDS = {"variants"}
 
 # Prompts por arquivo de mapeamento
 _PROMPTS: dict[str, str] = {
@@ -212,12 +243,13 @@ class LLMHarvester:
     def harvest_all_sync(self) -> HarvestReport:
         """Versão síncrona de harvest_all() — compatível com CLI (C3).
 
+        Seguro em contexto async (FastAPI/uvicorn): detecta loop em execução
+        e usa ThreadPoolExecutor para evitar RuntimeError de loop aninhado.
+
         Returns:
             HarvestReport com estatísticas de todos os arquivos processados.
         """
-        import asyncio
-
-        return asyncio.run(self.harvest_all())
+        return _run_sync(self.harvest_all())
 
     async def harvest_all(self) -> HarvestReport:
         """Processa todos os arquivos de mapeamento LLM em sequência.
@@ -235,15 +267,17 @@ class LLMHarvester:
         for filename in _LLM_TARGET_FILES:
             logger.info("LLMHarvester: processando %s", filename)
             try:
-                entries, tokens = await self._harvest_file(client, filename)
+                entries, tokens, skipped = await self._harvest_file(client, filename)
                 self._write_generated(filename, entries)
                 report.sources_processed.append(filename)
                 report.entries_per_file[filename] = len(entries)
                 report.tokens_used += tokens
+                report.skipped_entries += skipped
                 logger.info(
-                    "LLMHarvester: %s → %d entradas válidas (%d tokens)",
+                    "LLMHarvester: %s → %d entradas válidas, %d descartadas (%d tokens)",
                     filename,
                     len(entries),
+                    skipped,
                     tokens,
                 )
             except Exception as exc:  # noqa: BLE001
@@ -261,11 +295,11 @@ class LLMHarvester:
         self,
         client: object,
         filename: str,
-    ) -> tuple[dict, int]:
+    ) -> tuple[dict, int, int]:
         """Chama o LLM para um arquivo de mapeamento e retorna entradas válidas.
 
         Returns:
-            Tupla (entradas_válidas, tokens_consumidos).
+            Tupla (entradas_válidas, tokens_consumidos, n_descartadas).
         """
         prompt = _PROMPTS[filename]
         response = await client.complete(prompt)  # type: ignore[attr-defined]
@@ -280,7 +314,7 @@ class LLMHarvester:
                 skipped,
             )
 
-        return entries, response.tokens_used
+        return entries, response.tokens_used, skipped
 
     def _parse_yaml(self, content: str) -> dict:
         """Parse YAML com fallback em 3 níveis (C2).
@@ -402,10 +436,10 @@ class LLMHarvester:
 
         merged = {**existing, **data}
 
-        target.write_text(
-            yaml.dump(merged, allow_unicode=True, default_flow_style=False, sort_keys=True),
-            encoding="utf-8",
-        )
+        tmp = target.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            yaml.dump(merged, f, allow_unicode=True, default_flow_style=False, sort_keys=True)
+        os.replace(tmp, target)
         logger.debug("LLMHarvester: gravado %s (%d entradas)", target, len(merged))
 
 
@@ -517,6 +551,9 @@ class LLMSingleHarvester:
     def harvest_single_sync(self, category: str, key: str) -> dict | None:
         """Versão síncrona de harvest_single() — compatível com código não-async.
 
+        Seguro em contexto async (FastAPI/uvicorn): detecta loop em execução
+        e usa ThreadPoolExecutor para evitar RuntimeError de loop aninhado.
+
         Args:
             category: "function" | "proc" | "sql_dialect" | "format" | "informat"
             key: Nome da entrada (ex: "PRXMATCH", "TRANSPOSE", "WEEKDATE.")
@@ -524,9 +561,7 @@ class LLMSingleHarvester:
         Returns:
             Dict com o mapeamento ou None se LLM não conseguiu.
         """
-        import asyncio
-
-        return asyncio.run(self.harvest_single(category=category, key=key))
+        return _run_sync(self.harvest_single(category=category, key=key))
 
     async def harvest_single(self, category: str, key: str) -> dict | None:
         """Gera mapeamento para uma única entrada via LLM.

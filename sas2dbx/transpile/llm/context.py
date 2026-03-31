@@ -60,50 +60,65 @@ def build_context(
         "pyspark_references": [],
     }
 
+    # Budget de tokens: 1 token ≈ 4 caracteres (estimativa conservadora)
+    _budget = max_tokens * 4
+
+    def _fits(value: Any) -> bool:
+        """Verifica se `value` cabe no budget restante e desconta se sim."""
+        nonlocal _budget
+        cost = len(str(value))
+        if cost <= _budget:
+            _budget -= cost
+            return True
+        logger.debug("ContextBuilder: budget esgotado, entrada omitida")
+        return False
+
     # Funções SAS → PySpark (com on-demand harvest)
     for func in func_names or []:
         result = ks.lookup_function_or_harvest(func)
-        if result is not None:
+        if result is not None and _fits(result):
             context["function_mappings"][func.upper()] = result
 
     # PROCs SAS (com on-demand harvest)
     for proc in proc_names or []:
         result = ks.lookup_proc_or_harvest(proc)
-        if result is not None:
+        if result is not None and _fits(result):
             context["proc_mappings"][proc.upper()] = result
 
     # Construtos de dialeto SQL (com on-demand harvest)
     for construct in sql_constructs or []:
         result = ks.lookup_sql_dialect_or_harvest(construct)
-        if result is not None:
+        if result is not None and _fits(result):
             context["sql_dialect_notes"][construct.upper()] = result
 
     # Formatos SAS (com on-demand harvest)
     for fmt in format_names or []:
         result = ks.lookup_format_or_harvest(fmt)
-        if result is not None:
+        if result is not None and _fits(result):
             context["format_mappings"][fmt.upper()] = result
 
     # Docs de referência SAS (lookup simples — sem on-demand)
     for category, name in sas_reference_keys or []:
         doc = ks.get_reference("sas", category, name)
-        if doc:
+        if doc and _fits(doc):
             context["sas_references"].append({"category": category, "name": name, "content": doc})
 
     # Docs de referência PySpark (lookup simples — sem on-demand)
     for category, name in pyspark_reference_keys or []:
         doc = ks.get_reference("pyspark", category, name)
-        if doc:
+        if doc and _fits(doc):
             context["pyspark_references"].append(
                 {"category": category, "name": name, "content": doc}
             )
 
     logger.debug(
-        "ContextBuilder: %d funções, %d procs, %d SQL constructs, %d formatos",
+        "ContextBuilder: %d funções, %d procs, %d SQL constructs, %d formatos "
+        "(budget restante: ~%d tokens)",
         len(context["function_mappings"]),
         len(context["proc_mappings"]),
         len(context["sql_dialect_notes"]),
         len(context["format_mappings"]),
+        _budget // 4,
     )
 
     return context

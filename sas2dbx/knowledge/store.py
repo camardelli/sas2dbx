@@ -125,6 +125,13 @@ class KnowledgeStore:
             return result
         return self._on_demand_harvest("format", format_name.upper(), "formats_map.yaml")
 
+    def lookup_informat_or_harvest(self, informat_name: str) -> dict[str, Any] | None:
+        """Lookup de informat SAS com harvest on-demand se não encontrado."""
+        result = self._lookup_in_mapping("informats_map.yaml", informat_name.upper())
+        if result is not None:
+            return result
+        return self._on_demand_harvest("informat", informat_name.upper(), "informats_map.yaml")
+
     # -------------------------------------------------------------------------
     # Retrieval — markdown reference docs
     # -------------------------------------------------------------------------
