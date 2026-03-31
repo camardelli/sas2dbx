@@ -8,6 +8,15 @@ version = "0.1.0"
 description = "SAS Query to Databricks Migrator — AI-first transpilation tool"
 readme = "README.md"
 requires-python = ">=3.11"
+license = { text = "MIT" }
+keywords = ["sas", "databricks", "pyspark", "migration", "transpiler"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Code Generators",
+]
 dependencies = [
     "pyyaml>=6.0",
     "typer[all]>=0.12",

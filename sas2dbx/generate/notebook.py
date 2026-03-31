@@ -17,7 +17,6 @@ import logging
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 
@@ -282,5 +281,3 @@ def _to_ipynb_source(text: str) -> list[str]:
     return [line + "\n" for line in lines[:-1]] + ([lines[-1]] if lines else [])
 
 
-def _now_iso() -> str:
-    return datetime.now(tz=UTC).isoformat(timespec="seconds")

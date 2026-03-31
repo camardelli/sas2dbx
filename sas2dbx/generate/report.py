@@ -118,7 +118,13 @@ class ReportGenerator:
         total = len(results)
         fully_migrated = sum(1 for r in results if r.status == JobStatus.DONE)
         failed = sum(1 for r in results if r.status == JobStatus.FAILED)
-        partial = total - fully_migrated - failed
+        # "partial" = DONE mas com warnings de validação ou baixa confiança
+        partial = sum(
+            1
+            for r in results
+            if r.status == JobStatus.DONE
+            and (r.warnings or (r.validation_result and r.validation_result.warnings))
+        )
 
         done_confidences = [r.confidence for r in results if r.status == JobStatus.DONE]
         avg_confidence = (

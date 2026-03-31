@@ -80,6 +80,11 @@ class WorkflowGenerator:
         definition = self._build_definition(graph)
 
         fmt = self._config.output_format.lower()
+        if fmt not in ("yaml", "json"):
+            logger.warning(
+                "WorkflowGenerator: output_format desconhecido '%s' — usando yaml",
+                self._config.output_format,
+            )
         if fmt == "json":
             out = output_path.with_suffix(".json")
             out.parent.mkdir(parents=True, exist_ok=True)
