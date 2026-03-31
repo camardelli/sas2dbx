@@ -18,15 +18,19 @@ Decisões arquiteturais aplicadas:
 
 from __future__ import annotations
 
+import io
 import logging
+import zipfile
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 
 from sas2dbx.web.api.schemas import (
     JobProgress,
+    JobResult,
     MigrationResponse,
+    MigrationResultsResponse,
     MigrationStatusResponse,
     MigrationSummary,
     ProgressSummary,
@@ -171,25 +175,55 @@ async def get_migration_status(
 
 
 # ---------------------------------------------------------------------------
-# Placeholders Story 7.3
+# Story 7.3 — Endpoints de resultado
 # ---------------------------------------------------------------------------
 
 
-@router.get("/migrations/{migration_id}/results")
+@router.get("/migrations/{migration_id}/results", response_model=MigrationResultsResponse)
 async def get_migration_results(
     migration_id: UUID,
     request: Request,
-) -> dict:
-    """Retorna resultados completos (disponível quando status=done). [Story 7.3]"""
+) -> MigrationResultsResponse:
+    """Retorna resultados completos (disponível quando status=done).
+
+    Consolida state.json com presença de notebooks e docs gerados.
+    """
     storage = _storage(request)
     try:
-        meta = storage.get_meta(str(migration_id))
+        data = storage.get_status(str(migration_id))
     except MigrationNotFoundError:
         raise HTTPException(status_code=404, detail="Migração não encontrada.") from None
-    if meta["status"] != "done":
+    if data["status"] != "done":
         raise HTTPException(status_code=409, detail="Migração ainda não concluída.")
-    # Implementação completa no Story 7.3
-    return {"migration_id": str(migration_id), "status": "done"}
+
+    migration_dir = storage.get_migration_dir(str(migration_id))
+    output_dir = migration_dir / "output"
+    docs_jobs_dir = migration_dir / "docs" / "jobs"
+    mid_str = str(migration_id)
+
+    jobs: list[JobResult] = []
+    for job in data["jobs"]:
+        job_id = job["job_id"]
+        notebook = output_dir / f"{job_id}.py"
+        doc = docs_jobs_dir / f"{job_id}.md"
+        jobs.append(JobResult(
+            job_id=job_id,
+            status=job["status"],
+            confidence=job.get("confidence"),
+            error=job.get("error"),
+            has_notebook=notebook.exists(),
+            has_doc=doc.exists(),
+        ))
+
+    return MigrationResultsResponse(
+        migration_id=mid_str,
+        status=data["status"],
+        created_at=data["created_at"],
+        summary=ProgressSummary(**data["progress"]),
+        jobs=jobs,
+        explorer_url=f"/api/migrations/{mid_str}/explorer",
+        download_url=f"/api/migrations/{mid_str}/download",
+    )
 
 
 @router.get("/migrations/{migration_id}/explorer", response_class=HTMLResponse)
@@ -197,7 +231,7 @@ async def get_explorer(
     migration_id: UUID,
     request: Request,
 ) -> HTMLResponse:
-    """Serve o HTML do Architecture Explorer. [Story 7.3]"""
+    """Serve o HTML do Architecture Explorer."""
     storage = _storage(request)
     try:
         migration_dir = storage.get_migration_dir(str(migration_id))
@@ -213,8 +247,8 @@ async def get_explorer(
 async def download_results(
     migration_id: UUID,
     request: Request,
-) -> dict:
-    """Retorna .zip com notebooks + docs gerados. [Story 7.3]"""
+) -> StreamingResponse:
+    """Retorna .zip com notebooks (.py) + docs (.md) + explorer.html."""
     storage = _storage(request)
     try:
         meta = storage.get_meta(str(migration_id))
@@ -222,5 +256,30 @@ async def download_results(
         raise HTTPException(status_code=404, detail="Migração não encontrada.") from None
     if meta["status"] != "done":
         raise HTTPException(status_code=409, detail="Migração ainda não concluída.")
-    # Implementação completa no Story 7.3
-    return {"migration_id": str(migration_id), "download": "not_yet_implemented"}
+
+    migration_dir = storage.get_migration_dir(str(migration_id))
+    buf = io.BytesIO()
+
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        # Notebooks gerados
+        output_dir = migration_dir / "output"
+        for nb in sorted(output_dir.glob("*.py")):
+            zf.write(nb, arcname=f"output/{nb.name}")
+
+        # Docs (ARCHITECTURE.md + jobs/*.md)
+        docs_dir = migration_dir / "docs"
+        for doc in sorted(docs_dir.rglob("*.md")):
+            zf.write(doc, arcname=f"docs/{doc.relative_to(docs_dir)}")
+
+        # Explorer HTML
+        explorer_path = migration_dir / "explorer.html"
+        if explorer_path.exists():
+            zf.write(explorer_path, arcname="explorer.html")
+
+    buf.seek(0)
+    filename = f"migration_{str(migration_id)[:8]}.zip"
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

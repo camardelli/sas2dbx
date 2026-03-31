@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SAS2DBX — Migrador SAS → Databricks</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --surface2: #22263a;
+      --border: #2e3248;
+      --text: #e2e4ef;
+      --muted: #7c82a3;
+      --accent: #5b6af0;
+      --accent-hover: #4a59e0;
+      --green: #22c55e;
+      --red: #ef4444;
+      --yellow: #f59e0b;
+      --blue: #3b82f6;
+      --radius: 8px;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    /* ---- Layout ---- */
+    header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 14px 32px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    header h1 { font-size: 1.1rem; font-weight: 600; letter-spacing: .02em; }
+    header span { color: var(--muted); font-size: .85rem; }
+
+    .screen { display: none; max-width: 860px; margin: 40px auto; padding: 0 24px; }
+    .screen.active { display: block; }
+
+    /* ---- Cards ---- */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px;
+      margin-bottom: 24px;
+    }
+    .card h2 { font-size: 1rem; font-weight: 600; margin-bottom: 16px; }
+
+    /* ---- Upload ---- */
+    #drop-zone {
+      border: 2px dashed var(--border);
+      border-radius: var(--radius);
+      padding: 36px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color .2s, background .2s;
+    }
+    #drop-zone:hover, #drop-zone.drag-over {
+      border-color: var(--accent);
+      background: rgba(91,106,240,.06);
+    }
+    #drop-zone p { color: var(--muted); font-size: .9rem; margin-top: 8px; }
+    #drop-zone strong { color: var(--text); }
+    #file-input { display: none; }
+    #file-label {
+      display: inline-block;
+      margin-top: 12px;
+      padding: 7px 16px;
+      background: var(--accent);
+      color: #fff;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: .85rem;
+      transition: background .15s;
+    }
+    #file-label:hover { background: var(--accent-hover); }
+    #selected-file {
+      margin-top: 10px;
+      font-size: .85rem;
+      color: var(--green);
+      min-height: 18px;
+    }
+
+    .form-row { display: flex; gap: 12px; margin-top: 14px; flex-wrap: wrap; }
+    .form-group { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 140px; }
+    .form-group label { font-size: .78rem; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+    .form-group input {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      padding: 7px 10px;
+      font-size: .9rem;
+      outline: none;
+      transition: border-color .15s;
+    }
+    .form-group input:focus { border-color: var(--accent); }
+
+    .btn-primary {
+      display: block;
+      width: 100%;
+      margin-top: 16px;
+      padding: 10px;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      font-size: .95rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background .15s, opacity .15s;
+    }
+    .btn-primary:hover { background: var(--accent-hover); }
+    .btn-primary:disabled { opacity: .5; cursor: not-allowed; }
+
+    #upload-error {
+      margin-top: 10px;
+      color: var(--red);
+      font-size: .85rem;
+      min-height: 18px;
+    }
+
+    /* ---- History table ---- */
+    .history-empty { color: var(--muted); font-size: .9rem; text-align: center; padding: 20px 0; }
+    table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+    th { color: var(--muted); font-weight: 500; text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); font-size: .78rem; text-transform: uppercase; letter-spacing: .05em; }
+    td { padding: 10px 10px; border-bottom: 1px solid var(--border); }
+    tr:last-child td { border-bottom: none; }
+    tr.clickable { cursor: pointer; transition: background .1s; }
+    tr.clickable:hover td { background: var(--surface2); }
+    .mono { font-family: "SF Mono", "Fira Code", monospace; font-size: .82rem; color: var(--muted); }
+
+    /* ---- Status badges ---- */
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 99px;
+      font-size: .75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+    }
+    .badge-pending   { background: rgba(245,158,11,.15); color: var(--yellow); }
+    .badge-processing{ background: rgba(59,130,246,.15); color: var(--blue); }
+    .badge-done      { background: rgba(34,197,94,.15);  color: var(--green); }
+    .badge-failed    { background: rgba(239,68,68,.15);  color: var(--red); }
+
+    /* ---- Tela 2 ---- */
+    #back-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--muted);
+      font-size: .85rem;
+      cursor: pointer;
+      margin-bottom: 20px;
+      background: none;
+      border: none;
+      padding: 0;
+    }
+    #back-btn:hover { color: var(--text); }
+
+    .meta-grid { display: flex; gap: 24px; flex-wrap: wrap; margin-bottom: 4px; }
+    .meta-item { display: flex; flex-direction: column; gap: 2px; }
+    .meta-item .label { font-size: .75rem; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+    .meta-item .value { font-size: .92rem; }
+
+    /* ---- Progress bar ---- */
+    .progress-wrap { margin: 16px 0 6px; }
+    .progress-bar-bg {
+      background: var(--surface2);
+      border-radius: 99px;
+      height: 8px;
+      overflow: hidden;
+    }
+    .progress-bar-fill {
+      height: 100%;
+      background: var(--accent);
+      border-radius: 99px;
+      transition: width .4s ease;
+    }
+    .progress-label { font-size: .8rem; color: var(--muted); margin-top: 6px; }
+
+    /* ---- Jobs list ---- */
+    .job-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--border);
+      font-size: .88rem;
+    }
+    .job-row:last-child { border-bottom: none; }
+    .job-name { flex: 1; }
+    .job-conf { color: var(--muted); font-size: .8rem; min-width: 60px; text-align: right; }
+
+    /* ---- Actions ---- */
+    .action-bar { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 8px; }
+    .btn-action {
+      padding: 8px 16px;
+      border-radius: 6px;
+      font-size: .875rem;
+      font-weight: 500;
+      cursor: pointer;
+      border: 1px solid var(--border);
+      background: var(--surface2);
+      color: var(--text);
+      text-decoration: none;
+      transition: background .15s, border-color .15s;
+    }
+    .btn-action:hover { background: var(--border); border-color: var(--accent); }
+    .btn-action.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .btn-action.primary:hover { background: var(--accent-hover); }
+
+    .error-box {
+      background: rgba(239,68,68,.1);
+      border: 1px solid rgba(239,68,68,.3);
+      border-radius: 6px;
+      padding: 12px 16px;
+      color: var(--red);
+      font-size: .88rem;
+      margin-top: 12px;
+    }
+
+    .polling-dot::after {
+      content: "";
+      display: inline-block;
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--blue);
+      margin-left: 8px;
+      animation: pulse 1.2s infinite;
+      vertical-align: middle;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: .3; }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+    <rect width="22" height="22" rx="5" fill="#5b6af0"/>
+    <path d="M6 7h10M6 11h7M6 15h4" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
+  </svg>
+  <h1>SAS2DBX</h1>
+  <span>SAS → Databricks Migrator</span>
+</header>
+
+<!-- ===== TELA 1 ===== -->
+<div id="screen-home" class="screen active">
+
+  <div class="card">
+    <h2>Nova Migração</h2>
+    <div id="drop-zone">
+      <svg width="32" height="32" fill="none" viewBox="0 0 32 32">
+        <path d="M16 4v16M9 11l7-7 7 7" stroke="#5b6af0" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M6 22v2a2 2 0 002 2h16a2 2 0 002-2v-2" stroke="#7c82a3" stroke-width="2" stroke-linecap="round"/>
+      </svg>
+      <p><strong>Arraste o .zip aqui</strong></p>
+      <p>ou clique para selecionar</p>
+      <label id="file-label" for="file-input">Selecionar arquivo</label>
+      <input type="file" id="file-input" accept=".zip" />
+      <div id="selected-file"></div>
+    </div>
+
+    <div class="form-row">
+      <div class="form-group">
+        <label>Catalog</label>
+        <input type="text" id="inp-catalog" value="main" placeholder="main" />
+      </div>
+      <div class="form-group">
+        <label>Schema</label>
+        <input type="text" id="inp-schema" value="migrated" placeholder="migrated" />
+      </div>
+      <div class="form-group">
+        <label>Encoding</label>
+        <input type="text" id="inp-encoding" value="auto" placeholder="auto" />
+      </div>
+    </div>
+
+    <button class="btn-primary" id="upload-btn" disabled>Iniciar Migração</button>
+    <div id="upload-error"></div>
+  </div>
+
+  <div class="card">
+    <h2>Migrações Anteriores</h2>
+    <div id="history-container">
+      <div class="history-empty">Carregando...</div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== TELA 2 ===== -->
+<div id="screen-detail" class="screen">
+  <button id="back-btn">← Voltar</button>
+
+  <div class="card" id="detail-header">
+    <div class="meta-grid">
+      <div class="meta-item">
+        <span class="label">Migration ID</span>
+        <span class="value mono" id="detail-id">—</span>
+      </div>
+      <div class="meta-item">
+        <span class="label">Status</span>
+        <span class="value" id="detail-status">—</span>
+      </div>
+      <div class="meta-item">
+        <span class="label">Criado em</span>
+        <span class="value" id="detail-created">—</span>
+      </div>
+    </div>
+
+    <div class="progress-wrap" id="progress-wrap">
+      <div class="progress-bar-bg">
+        <div class="progress-bar-fill" id="progress-fill" style="width:0%"></div>
+      </div>
+      <div class="progress-label" id="progress-label">Aguardando...</div>
+    </div>
+  </div>
+
+  <div class="card" id="detail-jobs-card">
+    <h2 id="jobs-title">Jobs</h2>
+    <div id="jobs-list"></div>
+  </div>
+
+  <div class="card" id="detail-actions" style="display:none">
+    <h2>Resultados</h2>
+    <div class="action-bar">
+      <a id="btn-explorer" href="#" target="_blank" class="btn-action primary">Abrir Explorer</a>
+      <a id="btn-download" href="#" class="btn-action">Baixar .zip</a>
+    </div>
+  </div>
+
+  <div id="detail-error"></div>
+</div>
+
+<script>
+// ============================================================
+// Router simples via hash
+// ============================================================
+const BASE = "/api";
+
+function route() {
+  const hash = location.hash || "#/";
+  if (hash.startsWith("#/migrations/")) {
+    const id = hash.replace("#/migrations/", "").split("/")[0];
+    showDetail(id);
+  } else {
+    showHome();
+  }
+}
+
+window.addEventListener("hashchange", route);
+window.addEventListener("load", route);
+
+// ============================================================
+// Utilitários
+// ============================================================
+
+/** Escapa caracteres HTML para prevenir XSS em interpolações de innerHTML. */
+function encodeHTML(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function badge(status) {
+  const allowed = ["pending", "processing", "done", "failed"];
+  const safe = allowed.includes(status) ? status : "pending";
+  const cls = { pending: "badge-pending", processing: "badge-processing", done: "badge-done", failed: "badge-failed" }[safe];
+  return `<span class="badge ${cls}">${safe}</span>`;
+}
+
+function fmtDate(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return d.toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" });
+}
+
+async function apiFetch(path, opts) {
+  const r = await fetch(BASE + path, opts);
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    throw Object.assign(new Error(body.detail || r.statusText), { status: r.status });
+  }
+  return r;
+}
+
+// ============================================================
+// Tela 1 — Home
+// ============================================================
+let _pollingTimer = null;
+
+function showHome() {
+  stopPolling();
+  document.getElementById("screen-home").classList.add("active");
+  document.getElementById("screen-detail").classList.remove("active");
+  loadHistory();
+}
+
+async function loadHistory() {
+  const container = document.getElementById("history-container");
+  try {
+    const r = await apiFetch("/migrations/");
+    const list = await r.json();
+    if (!list.length) {
+      container.innerHTML = '<div class="history-empty">Nenhuma migração ainda.</div>';
+      return;
+    }
+    container.innerHTML = `
+      <table>
+        <thead><tr>
+          <th>ID</th><th>Status</th><th>Criado em</th>
+        </tr></thead>
+        <tbody>
+          ${list.map(m => `
+            <tr class="clickable" onclick="location.hash='#/migrations/${encodeHTML(m.migration_id)}'">
+              <td class="mono">${encodeHTML(m.migration_id.substring(0, 8))}…</td>
+              <td>${badge(m.status)}</td>
+              <td>${fmtDate(m.created_at)}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>`;
+  } catch (e) {
+    container.innerHTML = `<div class="history-empty" style="color:var(--red)">Erro ao carregar histórico.</div>`;
+  }
+}
+
+// ---- Upload ----
+const dropZone = document.getElementById("drop-zone");
+const fileInput = document.getElementById("file-input");
+const uploadBtn = document.getElementById("upload-btn");
+const selectedFile = document.getElementById("selected-file");
+const uploadError = document.getElementById("upload-error");
+let selectedFileObj = null;
+
+function setFile(f) {
+  selectedFileObj = f;
+  selectedFile.textContent = f ? `✓ ${f.name} (${(f.size/1024).toFixed(1)} KB)` : "";
+  uploadBtn.disabled = !f;
+}
+
+fileInput.addEventListener("change", () => setFile(fileInput.files[0] || null));
+dropZone.addEventListener("click", e => { if (e.target !== document.getElementById("file-label")) fileInput.click(); });
+dropZone.addEventListener("dragover", e => { e.preventDefault(); dropZone.classList.add("drag-over"); });
+dropZone.addEventListener("dragleave", () => dropZone.classList.remove("drag-over"));
+dropZone.addEventListener("drop", e => {
+  e.preventDefault();
+  dropZone.classList.remove("drag-over");
+  const f = e.dataTransfer.files[0];
+  if (f && f.name.endsWith(".zip")) setFile(f);
+  else uploadError.textContent = "Apenas arquivos .zip são aceitos.";
+});
+
+uploadBtn.addEventListener("click", async () => {
+  if (!selectedFileObj) return;
+  uploadError.textContent = "";
+  uploadBtn.disabled = true;
+  uploadBtn.textContent = "Enviando…";
+
+  const fd = new FormData();
+  fd.append("file", selectedFileObj);
+  fd.append("catalog", document.getElementById("inp-catalog").value || "main");
+  fd.append("db_schema", document.getElementById("inp-schema").value || "migrated");
+  fd.append("encoding", document.getElementById("inp-encoding").value || "auto");
+
+  try {
+    const r = await apiFetch("/migrations", { method: "POST", body: fd });
+    const data = await r.json();
+    location.hash = `#/migrations/${data.migration_id}`;
+  } catch (e) {
+    uploadError.textContent = e.message || "Erro no upload.";
+    uploadBtn.disabled = false;
+    uploadBtn.textContent = "Iniciar Migração";
+  }
+});
+
+// ============================================================
+// Tela 2 — Detalhe / Polling
+// ============================================================
+function showDetail(id) {
+  document.getElementById("screen-home").classList.remove("active");
+  document.getElementById("screen-detail").classList.add("active");
+  document.getElementById("detail-id").textContent = id;
+  document.getElementById("detail-actions").style.display = "none";
+  document.getElementById("detail-error").innerHTML = "";
+  document.getElementById("jobs-list").innerHTML = "";
+  document.getElementById("detail-status").innerHTML = badge("pending");
+  document.getElementById("progress-label").textContent = "Aguardando...";
+  document.getElementById("progress-fill").style.width = "0%";
+  startPolling(id);
+}
+
+document.getElementById("back-btn").addEventListener("click", () => {
+  location.hash = "#/";
+});
+
+function startPolling(id) {
+  stopPolling();
+  fetchStatus(id);
+  _pollingTimer = setInterval(() => fetchStatus(id), 3000);
+}
+
+function stopPolling() {
+  if (_pollingTimer) { clearInterval(_pollingTimer); _pollingTimer = null; }
+}
+
+async function fetchStatus(id) {
+  try {
+    const r = await apiFetch(`/migrations/${id}`);
+    const data = await r.json();
+    renderStatus(data);
+    if (data.status === "done" || data.status === "failed") {
+      stopPolling();
+      if (data.status === "done") fetchResultLinks(id);
+    }
+  } catch (e) {
+    stopPolling();
+    document.getElementById("detail-error").innerHTML =
+      `<div class="error-box">Erro ao buscar status: ${e.message}</div>`;
+  }
+}
+
+function renderStatus(data) {
+  const isRunning = data.status === "processing" || data.status === "pending";
+
+  // Status badge
+  const statusEl = document.getElementById("detail-status");
+  statusEl.innerHTML = badge(data.status);
+  if (isRunning) statusEl.classList.add("polling-dot");
+  else statusEl.classList.remove("polling-dot");
+
+  document.getElementById("detail-created").textContent = fmtDate(data.created_at);
+
+  // Progress bar
+  const p = data.progress;
+  const total = p.total || 0;
+  const done = p.done || 0;
+  const failed = p.failed || 0;
+  const pct = total > 0 ? Math.round(((done + failed) / total) * 100) : (data.status === "done" ? 100 : 0);
+  document.getElementById("progress-fill").style.width = pct + "%";
+  document.getElementById("progress-label").textContent =
+    total > 0 ? `${done + failed} / ${total} jobs · ${done} concluídos · ${failed} com falha` :
+    (data.status === "processing" ? "Processando…" : data.status === "done" ? "Concluído" : "Aguardando…");
+
+  // Jobs list
+  const list = document.getElementById("jobs-list");
+  if (data.jobs && data.jobs.length) {
+    document.getElementById("jobs-title").textContent = `Jobs (${data.jobs.length})`;
+    list.innerHTML = data.jobs.map(j => `
+      <div class="job-row">
+        <span class="job-name">${encodeHTML(j.job_id)}</span>
+        ${badge(j.status)}
+        <span class="job-conf">${j.confidence != null ? (j.confidence * 100).toFixed(0) + "%" : ""}</span>
+      </div>`).join("");
+  } else {
+    list.innerHTML = `<div style="color:var(--muted);font-size:.88rem;padding:8px 0">${isRunning ? "Aguardando início do processamento…" : "Nenhum job encontrado."}</div>`;
+  }
+
+  // Erro global
+  if (data.error) {
+    document.getElementById("detail-error").innerHTML =
+      `<div class="error-box"><strong>Erro:</strong> ${encodeHTML(data.error)}</div>`;
+  }
+}
+
+async function fetchResultLinks(id) {
+  try {
+    const r = await apiFetch(`/migrations/${id}/results`);
+    const data = await r.json();
+    document.getElementById("btn-explorer").href = data.explorer_url;
+    document.getElementById("btn-download").href = data.download_url;
+    document.getElementById("detail-actions").style.display = "block";
+  } catch (_) {
+    // resultados não críticos — omite sem erro
+  }
+}
+</script>
+</body>
+</html>

@@ -28,7 +28,7 @@ _DEFAULT_MAX_UPLOAD_MB = 100
 
 
 def create_app(
-    work_dir: str = _DEFAULT_WORK_DIR,
+    work_dir: str | None = None,
     max_upload_mb: int | None = None,
 ) -> FastAPI:
     """Cria e configura a aplicação FastAPI.
@@ -46,8 +46,12 @@ def create_app(
     from sas2dbx.web.storage import MigrationStorage
     from sas2dbx.web.worker import MigrationWorker
 
-    resolved_max_mb = max_upload_mb or int(
-        os.environ.get("MAX_UPLOAD_MB", str(_DEFAULT_MAX_UPLOAD_MB))
+    resolved_work_dir = (
+        work_dir if work_dir is not None else os.environ.get("WORK_DIR", _DEFAULT_WORK_DIR)
+    )
+    resolved_max_mb = (
+        max_upload_mb if max_upload_mb is not None
+        else int(os.environ.get("MAX_UPLOAD_MB", str(_DEFAULT_MAX_UPLOAD_MB)))
     )
 
     app = FastAPI(
@@ -60,12 +64,12 @@ def create_app(
     )
 
     # Injeta dependências compartilhadas em app.state (R22, R19)
-    storage = MigrationStorage(Path(work_dir))
+    storage = MigrationStorage(Path(resolved_work_dir))
     llm_config = LLMConfig(api_key=os.environ.get("ANTHROPIC_API_KEY"))
     app.state.storage = storage
     app.state.worker = MigrationWorker(storage=storage, llm_config=llm_config)
     app.state.max_upload_bytes = resolved_max_mb * 1024 * 1024
-    app.state.work_dir = Path(work_dir)
+    app.state.work_dir = Path(resolved_work_dir)
 
     # API routes
     app.include_router(router, prefix="/api")
@@ -80,7 +84,7 @@ def create_app(
 
     logger.info(
         "App: iniciado — work_dir=%s, max_upload=%sMB",
-        work_dir,
+        resolved_work_dir,
         resolved_max_mb,
     )
     return app

@@ -212,25 +212,42 @@ class TestGetMigrationStatus:
 
 
 # ---------------------------------------------------------------------------
-# Placeholder endpoints (Story 7.3)
+# Story 7.3 — Endpoints de resultado
 # ---------------------------------------------------------------------------
 
 
-class TestPlaceholderEndpoints:
-    def _create_done(self, client: TestClient, tmp_path: Path) -> str:
-        """Cria migração e força status=done no meta.json."""
-        resp = client.post(
-            "/api/migrations",
-            files={"file": ("jobs.zip", _SIMPLE_ZIP, "application/zip")},
-        )
-        mid = resp.json()["migration_id"]
-        meta_path = tmp_path / "work" / "migrations" / mid / "meta.json"
-        meta = json.loads(meta_path.read_text())
-        meta["status"] = "done"
-        meta_path.write_text(json.dumps(meta))
-        return mid
+def _create_done(client: TestClient, tmp_path: Path) -> str:
+    """Cria migração e força status=done no meta.json."""
+    resp = client.post(
+        "/api/migrations",
+        files={"file": ("jobs.zip", _SIMPLE_ZIP, "application/zip")},
+    )
+    mid = resp.json()["migration_id"]
+    meta_path = tmp_path / "work" / "migrations" / mid / "meta.json"
+    meta = json.loads(meta_path.read_text())
+    meta["status"] = "done"
+    meta_path.write_text(json.dumps(meta))
+    return mid
 
-    def test_results_409_when_not_done(self, client: TestClient) -> None:
+
+def _seed_artifacts(tmp_path: Path, mid: str) -> None:
+    """Popula output/ e docs/ com artefatos simulados de pipeline concluído."""
+    base = tmp_path / "work" / "migrations" / mid
+    (base / "output").mkdir(parents=True, exist_ok=True)
+    (base / "docs" / "jobs").mkdir(parents=True, exist_ok=True)
+
+    (base / "output" / "job_a.py").write_text("# notebook job_a\nprint('ok')")
+    (base / "docs" / "ARCHITECTURE.md").write_text("# Architecture")
+    (base / "docs" / "jobs" / "job_a.md").write_text("# job_a\nDoc aqui.")
+    (base / "explorer.html").write_text("<html><body>explorer</body></html>")
+
+    # state.json com job concluído
+    state = {"jobs": {"job_a": {"status": "done", "confidence": 0.95}}}
+    (base / "output" / ".sas2dbx_state.json").write_text(json.dumps(state))
+
+
+class TestResults:
+    def test_returns_409_when_not_done(self, client: TestClient) -> None:
         resp = client.post(
             "/api/migrations",
             files={"file": ("jobs.zip", _SIMPLE_ZIP, "application/zip")},
@@ -238,33 +255,156 @@ class TestPlaceholderEndpoints:
         mid = resp.json()["migration_id"]
         assert client.get(f"/api/migrations/{mid}/results").status_code == 409
 
-    def test_results_200_when_done(self, client: TestClient, tmp_path: Path) -> None:
-        mid = self._create_done(client, tmp_path)
+    def test_returns_404_for_unknown(self, client: TestClient) -> None:
+        assert client.get(
+            "/api/migrations/00000000-0000-0000-0000-000000000000/results"
+        ).status_code == 404
+
+    def test_returns_200_when_done(self, client: TestClient, tmp_path: Path) -> None:
+        mid = _create_done(client, tmp_path)
         assert client.get(f"/api/migrations/{mid}/results").status_code == 200
 
-    def test_explorer_404_when_html_missing(
+    def test_response_has_required_fields(self, client: TestClient, tmp_path: Path) -> None:
+        mid = _create_done(client, tmp_path)
+        _seed_artifacts(tmp_path, mid)
+        data = client.get(f"/api/migrations/{mid}/results").json()
+        assert data["migration_id"] == mid
+        assert data["status"] == "done"
+        assert "summary" in data
+        assert "jobs" in data
+        assert "explorer_url" in data
+        assert "download_url" in data
+
+    def test_summary_counts_jobs(self, client: TestClient, tmp_path: Path) -> None:
+        mid = _create_done(client, tmp_path)
+        _seed_artifacts(tmp_path, mid)
+        data = client.get(f"/api/migrations/{mid}/results").json()
+        assert data["summary"]["total"] == 1
+        assert data["summary"]["done"] == 1
+
+    def test_job_has_notebook_and_doc_flags(self, client: TestClient, tmp_path: Path) -> None:
+        mid = _create_done(client, tmp_path)
+        _seed_artifacts(tmp_path, mid)
+        data = client.get(f"/api/migrations/{mid}/results").json()
+        job = data["jobs"][0]
+        assert job["has_notebook"] is True
+        assert job["has_doc"] is True
+
+    def test_job_without_notebook_flags_false(
         self, client: TestClient, tmp_path: Path
     ) -> None:
-        mid = self._create_done(client, tmp_path)
+        mid = _create_done(client, tmp_path)
+        _seed_artifacts(tmp_path, mid)
+        (tmp_path / "work" / "migrations" / mid / "output" / "job_a.py").unlink()
+        data = client.get(f"/api/migrations/{mid}/results").json()
+        assert data["jobs"][0]["has_notebook"] is False
+
+    def test_explorer_url_points_to_correct_endpoint(
+        self, client: TestClient, tmp_path: Path
+    ) -> None:
+        mid = _create_done(client, tmp_path)
+        data = client.get(f"/api/migrations/{mid}/results").json()
+        assert data["explorer_url"] == f"/api/migrations/{mid}/explorer"
+
+    def test_download_url_points_to_correct_endpoint(
+        self, client: TestClient, tmp_path: Path
+    ) -> None:
+        mid = _create_done(client, tmp_path)
+        data = client.get(f"/api/migrations/{mid}/results").json()
+        assert data["download_url"] == f"/api/migrations/{mid}/download"
+
+
+class TestExplorer:
+    def test_returns_404_when_html_missing(
+        self, client: TestClient, tmp_path: Path
+    ) -> None:
+        mid = _create_done(client, tmp_path)
         assert client.get(f"/api/migrations/{mid}/explorer").status_code == 404
 
-    def test_explorer_200_when_html_exists(
+    def test_returns_200_when_html_exists(
         self, client: TestClient, tmp_path: Path
     ) -> None:
-        mid = self._create_done(client, tmp_path)
-        html_path = tmp_path / "work" / "migrations" / mid / "explorer.html"
-        html_path.write_text("<html><body>ok</body></html>")
+        mid = _create_done(client, tmp_path)
+        _seed_artifacts(tmp_path, mid)
         resp = client.get(f"/api/migrations/{mid}/explorer")
         assert resp.status_code == 200
         assert "html" in resp.headers["content-type"]
 
-    def test_download_409_when_not_done(self, client: TestClient) -> None:
+    def test_html_content_served(self, client: TestClient, tmp_path: Path) -> None:
+        mid = _create_done(client, tmp_path)
+        _seed_artifacts(tmp_path, mid)
+        resp = client.get(f"/api/migrations/{mid}/explorer")
+        assert "explorer" in resp.text
+
+    def test_returns_404_for_unknown(self, client: TestClient) -> None:
+        assert client.get(
+            "/api/migrations/00000000-0000-0000-0000-000000000000/explorer"
+        ).status_code == 404
+
+
+class TestDownload:
+    def test_returns_409_when_not_done(self, client: TestClient) -> None:
         resp = client.post(
             "/api/migrations",
             files={"file": ("jobs.zip", _SIMPLE_ZIP, "application/zip")},
         )
         mid = resp.json()["migration_id"]
         assert client.get(f"/api/migrations/{mid}/download").status_code == 409
+
+    def test_returns_404_for_unknown(self, client: TestClient) -> None:
+        assert client.get(
+            "/api/migrations/00000000-0000-0000-0000-000000000000/download"
+        ).status_code == 404
+
+    def test_returns_200_when_done(self, client: TestClient, tmp_path: Path) -> None:
+        mid = _create_done(client, tmp_path)
+        assert client.get(f"/api/migrations/{mid}/download").status_code == 200
+
+    def test_content_type_is_zip(self, client: TestClient, tmp_path: Path) -> None:
+        mid = _create_done(client, tmp_path)
+        resp = client.get(f"/api/migrations/{mid}/download")
+        assert resp.headers["content-type"] == "application/zip"
+
+    def test_content_disposition_attachment(
+        self, client: TestClient, tmp_path: Path
+    ) -> None:
+        mid = _create_done(client, tmp_path)
+        resp = client.get(f"/api/migrations/{mid}/download")
+        assert "attachment" in resp.headers["content-disposition"]
+        assert ".zip" in resp.headers["content-disposition"]
+
+    def test_zip_contains_notebook(self, client: TestClient, tmp_path: Path) -> None:
+        mid = _create_done(client, tmp_path)
+        _seed_artifacts(tmp_path, mid)
+        resp = client.get(f"/api/migrations/{mid}/download")
+        zf = zipfile.ZipFile(io.BytesIO(resp.content))
+        names = zf.namelist()
+        assert any(n.startswith("output/") and n.endswith(".py") for n in names)
+
+    def test_zip_contains_docs(self, client: TestClient, tmp_path: Path) -> None:
+        mid = _create_done(client, tmp_path)
+        _seed_artifacts(tmp_path, mid)
+        resp = client.get(f"/api/migrations/{mid}/download")
+        zf = zipfile.ZipFile(io.BytesIO(resp.content))
+        names = zf.namelist()
+        assert any(n.startswith("docs/") and n.endswith(".md") for n in names)
+
+    def test_zip_contains_explorer_html(self, client: TestClient, tmp_path: Path) -> None:
+        mid = _create_done(client, tmp_path)
+        _seed_artifacts(tmp_path, mid)
+        resp = client.get(f"/api/migrations/{mid}/download")
+        zf = zipfile.ZipFile(io.BytesIO(resp.content))
+        assert "explorer.html" in zf.namelist()
+
+    def test_zip_valid_even_without_artifacts(
+        self, client: TestClient, tmp_path: Path
+    ) -> None:
+        """Download deve retornar zip válido (possivelmente vazio) mesmo sem artefatos."""
+        mid = _create_done(client, tmp_path)
+        resp = client.get(f"/api/migrations/{mid}/download")
+        assert resp.status_code == 200
+        zf = zipfile.ZipFile(io.BytesIO(resp.content))
+        assert isinstance(zf.namelist(), list)
 
 
 # ---------------------------------------------------------------------------

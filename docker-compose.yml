@@ -1,0 +1,21 @@
+services:
+  sas2dbx:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - sas2dbx_work:/data/sas2dbx_work
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - MAX_UPLOAD_MB=${MAX_UPLOAD_MB:-200}
+      - WORK_DIR=/data/sas2dbx_work
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/openapi.json"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  sas2dbx_work:

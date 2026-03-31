@@ -40,9 +40,20 @@ class MigrationSummary(BaseModel):
     created_at: str
 
 
+class JobResult(BaseModel):
+    job_id: str
+    status: str
+    confidence: float | None = None
+    error: str | None = None
+    has_notebook: bool = False
+    has_doc: bool = False
+
+
 class MigrationResultsResponse(BaseModel):
     migration_id: str
-    summary: dict
-    jobs: list[dict]
-    architecture_explorer_url: str
+    status: str
+    created_at: str
+    summary: ProgressSummary
+    jobs: list[JobResult]
+    explorer_url: str
     download_url: str
