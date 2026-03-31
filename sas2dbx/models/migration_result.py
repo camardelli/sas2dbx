@@ -1,4 +1,4 @@
-"""Modelos de resultado de migração — JobStatus, MigrationResult."""
+"""Modelos de resultado de migração — JobStatus, MigrationResult, ValidationResult."""
 
 from __future__ import annotations
 
@@ -13,6 +13,41 @@ class JobStatus(StrEnum):
     IN_PROGRESS = "in_progress"
     DONE = "done"
     FAILED = "failed"
+
+
+@dataclass
+class ValidationWarning:
+    """Aviso semântico no código PySpark gerado (não bloqueia geração)."""
+
+    code: str          # identificador curto (ex: "UC_PREFIX")
+    message: str       # descrição legível
+    line: int | None = None  # linha aproximada no código gerado
+
+
+@dataclass
+class ValidationError:
+    """Erro semântico no código PySpark gerado (bloqueia uso sem correção)."""
+
+    code: str
+    message: str
+    line: int | None = None
+
+
+@dataclass
+class ValidationResult:
+    """Resultado da validação semântica de um bloco PySpark.
+
+    Attributes:
+        is_valid: True se não há erros (warnings são permitidos).
+        syntax_ok: True se ast.parse() passou.
+        warnings: Avisos que não bloqueiam geração.
+        errors: Erros que requerem correção.
+    """
+
+    is_valid: bool
+    syntax_ok: bool
+    warnings: list[ValidationWarning] = field(default_factory=list)
+    errors: list[ValidationError] = field(default_factory=list)
 
 
 @dataclass
