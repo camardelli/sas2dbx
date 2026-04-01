@@ -64,9 +64,185 @@ class MigrationWorker:
         thread.start()
         logger.info("MigrationWorker: thread iniciada para %s", migration_id)
 
+    def start_healing(
+        self,
+        migration_id: str,
+        healing_id: str,
+        config,
+        body,
+    ) -> None:
+        """Dispara o pipeline de self-healing em background thread.
+
+        Args:
+            migration_id: UUID da migração.
+            healing_id: UUID gerado para este processo de healing.
+            config: DatabricksConfig com credenciais.
+            body: HealRequest com notebook_name, execution_result e max_iterations.
+        """
+        thread = threading.Thread(
+            target=self._run_healing,
+            args=(migration_id, healing_id, config, body),
+            daemon=True,
+            name=f"heal-{healing_id[:8]}",
+        )
+        thread.start()
+        logger.info(
+            "MigrationWorker: healing %s iniciado para migração %s",
+            healing_id, migration_id,
+        )
+
+    def start_validation(
+        self,
+        migration_id: str,
+        config,
+        tables: list[str] | None = None,
+        deploy_only: bool = False,
+        collect_only: bool = False,
+    ) -> None:
+        """Dispara o pipeline de validação Databricks em background thread.
+
+        Args:
+            migration_id: UUID da migração a validar.
+            config: DatabricksConfig com credenciais e parâmetros.
+            tables: Tabelas a coletar após execução.
+            deploy_only: Se True, não executa o workflow.
+            collect_only: Se True, não faz deploy — apenas coleta tabelas.
+        """
+        thread = threading.Thread(
+            target=self._run_validation,
+            args=(migration_id, config, tables or [], deploy_only, collect_only),
+            daemon=True,
+            name=f"validate-{migration_id[:8]}",
+        )
+        thread.start()
+        logger.info("MigrationWorker: validação iniciada para %s", migration_id)
+
     # ------------------------------------------------------------------
     # Pipeline
     # ------------------------------------------------------------------
+
+    def _run_healing(
+        self,
+        migration_id: str,
+        healing_id: str,
+        config,
+        body,
+    ) -> None:
+        """Pipeline de self-healing em background."""
+        from sas2dbx.validate.executor import ExecutionResult
+        from sas2dbx.validate.heal.pipeline import SelfHealingPipeline
+
+        migration_dir = self._storage.get_migration_dir(migration_id)
+        output_dir = migration_dir / "output"
+        notebook_path = output_dir / f"{body.notebook_name}.py"
+
+        def _save_healing(data: dict) -> None:
+            meta = self._storage.get_meta(migration_id)
+            if "healings" not in meta:
+                meta["healings"] = {}
+            meta["healings"][healing_id] = data
+            self._storage.save_meta(migration_id, meta)
+
+        try:
+            exec_result = ExecutionResult(
+                run_id=body.execution_result.run_id,
+                status=body.execution_result.status,
+                duration_ms=body.execution_result.duration_ms,
+                error=body.execution_result.error,
+            )
+
+            pipeline = SelfHealingPipeline(
+                config=config,
+                max_iterations=body.max_iterations,
+            )
+            report = pipeline.heal(notebook_path, exec_result)
+
+            _save_healing({
+                "status": "done",
+                "healed": report.healed,
+                "iterations": report.iterations,
+                "strategy": report.suggestion.strategy,
+                "description": report.suggestion.description,
+                "error": None,
+            })
+            logger.info(
+                "MigrationWorker[heal %s]: concluído healed=%s iterations=%d",
+                healing_id, report.healed, report.iterations,
+            )
+
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("MigrationWorker[heal %s]: falha", healing_id)
+            _save_healing({
+                "status": "failed",
+                "healed": False,
+                "iterations": 0,
+                "strategy": "none",
+                "description": "",
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+
+    def _run_validation(
+        self,
+        migration_id: str,
+        config,
+        tables: list[str],
+        deploy_only: bool,
+        collect_only: bool,
+    ) -> None:
+        """Pipeline de validação Databricks em background."""
+        from sas2dbx.validate.collector import DatabricksCollector
+        from sas2dbx.validate.deployer import DatabricksDeployer
+        from sas2dbx.validate.executor import WorkflowExecutor
+        from sas2dbx.validate.report import generate_validation_report
+
+        migration_dir = self._storage.get_migration_dir(migration_id)
+        output_dir = migration_dir / "output"
+        notebooks = sorted(output_dir.glob("*.py"))
+
+        deploy_result = None
+        exec_result = None
+        table_validations: list = []
+
+        try:
+            # 1 — Deploy
+            if not collect_only and notebooks:
+                deployer = DatabricksDeployer(config)
+                nb = notebooks[0]
+                deploy_result = deployer.deploy(nb, nb.stem)
+                logger.info("MigrationWorker[validate %s]: deploy concluído — job_id=%d", migration_id, deploy_result.job_id)
+
+            # 2 — Execução
+            if not deploy_only and not collect_only and deploy_result:
+                executor = WorkflowExecutor(config)
+                exec_result = executor.execute(deploy_result.job_id)
+                deploy_result.run_id = exec_result.run_id
+                logger.info(
+                    "MigrationWorker[validate %s]: execução %s — run_id=%d",
+                    migration_id, exec_result.status, exec_result.run_id,
+                )
+
+            # 3 — Coleta de tabelas
+            if tables:
+                collector = DatabricksCollector(config)
+                table_validations = collector.collect(tables)
+
+            # 4 — Relatório
+            if deploy_result and exec_result:
+                report = generate_validation_report(deploy_result, exec_result, table_validations)
+            else:
+                report = {"summary": {"overall_status": "partial"}, "tables": []}
+
+            # Persiste resultado no meta
+            meta = self._storage.get_meta(migration_id)
+            meta["validation"] = {"status": "done", "report": report}
+            self._storage.save_meta(migration_id, meta)
+            logger.info("MigrationWorker[validate %s]: concluído", migration_id)
+
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("MigrationWorker[validate %s]: falha", migration_id)
+            meta = self._storage.get_meta(migration_id)
+            meta["validation"] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+            self._storage.save_meta(migration_id, meta)
 
     def _run(self, migration_id: str) -> None:
         """Ponto de entrada da thread — captura exceções de infraestrutura."""

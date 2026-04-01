@@ -27,6 +27,11 @@ from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, StreamingResponse
 
 from sas2dbx.web.api.schemas import (
+    DatabricksConfigRequest,
+    DatabricksConfigStatus,
+    HealRequest,
+    HealResponse,
+    HealStatusResponse,
     JobProgress,
     JobResult,
     MigrationResponse,
@@ -34,6 +39,10 @@ from sas2dbx.web.api.schemas import (
     MigrationStatusResponse,
     MigrationSummary,
     ProgressSummary,
+    TableValidationResult,
+    ValidationRequest,
+    ValidationResponse,
+    ValidationSummary,
 )
 from sas2dbx.web.storage import MigrationNotFoundError, MigrationStorage
 
@@ -53,6 +62,11 @@ def _storage(request: Request) -> MigrationStorage:
 
 def _max_upload_bytes(request: Request) -> int:
     return request.app.state.max_upload_bytes
+
+
+def _dbx_config(request: Request):
+    """Retorna DatabricksConfig do app.state, ou None se não configurado."""
+    return getattr(request.app.state, "databricks_config", None)
 
 
 # ---------------------------------------------------------------------------
@@ -282,4 +296,252 @@ async def download_results(
         buf,
         media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sprint 8 — Validation endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.post("/config/databricks", response_model=DatabricksConfigStatus, status_code=200)
+async def set_databricks_config(
+    request: Request,
+    body: DatabricksConfigRequest,
+) -> DatabricksConfigStatus:
+    """Configura credenciais Databricks para o pipeline de validação.
+
+    As credenciais são armazenadas em app.state.databricks_config (em memória,
+    não persistidas em disco para segurança).
+    """
+    try:
+        from sas2dbx.validate.config import DatabricksConfig
+    except ImportError:
+        raise HTTPException(
+            status_code=503,
+            detail="databricks-sdk não instalado — pip install sas2dbx[databricks]",
+        ) from None
+
+    cfg = DatabricksConfig(
+        host=body.host.rstrip("/"),
+        token=body.token,
+        catalog=body.catalog,
+        schema=body.db_schema,
+        node_type_id=body.node_type_id,
+        spark_version=body.spark_version,
+        warehouse_id=body.warehouse_id or None,
+    )
+    request.app.state.databricks_config = cfg
+    logger.info("POST /config/databricks: configuração atualizada para %s", cfg.host)
+    return DatabricksConfigStatus(**_config_to_status_dict(cfg))
+
+
+@router.get("/config/databricks/status", response_model=DatabricksConfigStatus)
+async def get_databricks_config_status(request: Request) -> DatabricksConfigStatus:
+    """Retorna status da configuração Databricks atual (sem o token)."""
+    cfg = _dbx_config(request)
+    if cfg is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Configuração Databricks não definida. Use POST /config/databricks.",
+        )
+    return DatabricksConfigStatus(**_config_to_status_dict(cfg))
+
+
+@router.post("/migrations/{migration_id}/validate", response_model=ValidationResponse, status_code=202)
+async def start_validation(
+    migration_id: UUID,
+    request: Request,
+    body: ValidationRequest,
+) -> ValidationResponse:
+    """Dispara o pipeline de validação (deploy → execute → collect) em background.
+
+    Requer que POST /config/databricks tenha sido chamado antes.
+    """
+    storage = _storage(request)
+    cfg = _dbx_config(request)
+
+    if cfg is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Configure as credenciais Databricks primeiro via POST /config/databricks.",
+        )
+
+    try:
+        meta = storage.get_meta(str(migration_id))
+    except MigrationNotFoundError:
+        raise HTTPException(status_code=404, detail="Migração não encontrada.") from None
+
+    if meta["status"] != "done":
+        raise HTTPException(status_code=409, detail="Migração ainda não concluída.")
+
+    # Dispara validação em background
+    worker = request.app.state.worker
+    worker.start_validation(str(migration_id), cfg, body.tables, body.deploy_only, body.collect_only)
+
+    return ValidationResponse(
+        migration_id=str(migration_id),
+        validation_status="running",
+    )
+
+
+@router.get("/migrations/{migration_id}/validation", response_model=ValidationResponse)
+async def get_validation_status(
+    migration_id: UUID,
+    request: Request,
+) -> ValidationResponse:
+    """Retorna status atual da validação (polling)."""
+    storage = _storage(request)
+    try:
+        meta = storage.get_meta(str(migration_id))
+    except MigrationNotFoundError:
+        raise HTTPException(status_code=404, detail="Migração não encontrada.") from None
+
+    validation = meta.get("validation")
+    if validation is None:
+        return ValidationResponse(
+            migration_id=str(migration_id),
+            validation_status="pending",
+        )
+
+    return _build_validation_response(str(migration_id), validation)
+
+
+@router.get("/migrations/{migration_id}/validation/report")
+async def get_validation_report(
+    migration_id: UUID,
+    request: Request,
+) -> dict:
+    """Retorna o relatório de validação completo (disponível após status=done)."""
+    storage = _storage(request)
+    try:
+        meta = storage.get_meta(str(migration_id))
+    except MigrationNotFoundError:
+        raise HTTPException(status_code=404, detail="Migração não encontrada.") from None
+
+    validation = meta.get("validation")
+    if validation is None or validation.get("status") != "done":
+        raise HTTPException(status_code=409, detail="Validação ainda não concluída.")
+
+    return validation.get("report", {})
+
+
+# ---------------------------------------------------------------------------
+# Sprint 9 — Self-Healing endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.post("/migrations/{migration_id}/heal", response_model=HealResponse, status_code=202)
+async def start_healing(
+    migration_id: UUID,
+    request: Request,
+    body: HealRequest,
+) -> HealResponse:
+    """Dispara o pipeline de self-healing para um notebook com execução falha.
+
+    Requer que POST /config/databricks tenha sido chamado antes.
+    Requer que body.execution_result.status == "FAILED".
+    """
+    from uuid import uuid4
+
+    storage = _storage(request)
+    cfg = _dbx_config(request)
+
+    if cfg is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Configure as credenciais Databricks primeiro via POST /config/databricks.",
+        )
+
+    if body.execution_result.status != "FAILED":
+        raise HTTPException(
+            status_code=422,
+            detail="execution_result.status deve ser 'FAILED' para iniciar healing.",
+        )
+
+    try:
+        storage.get_meta(str(migration_id))
+    except MigrationNotFoundError:
+        raise HTTPException(status_code=404, detail="Migração não encontrada.") from None
+
+    healing_id = str(uuid4())
+    worker = request.app.state.worker
+    worker.start_healing(str(migration_id), healing_id, cfg, body)
+
+    logger.info(
+        "POST /migrations/%s/heal: healing_id=%s notebook=%s",
+        migration_id, healing_id, body.notebook_name,
+    )
+    return HealResponse(
+        healing_id=healing_id,
+        migration_id=str(migration_id),
+        status="running",
+    )
+
+
+@router.get("/migrations/{migration_id}/heal/{healing_id}", response_model=HealStatusResponse)
+async def get_healing_status(
+    migration_id: UUID,
+    healing_id: str,
+    request: Request,
+) -> HealStatusResponse:
+    """Retorna status atual de um processo de healing (polling)."""
+    storage = _storage(request)
+    try:
+        meta = storage.get_meta(str(migration_id))
+    except MigrationNotFoundError:
+        raise HTTPException(status_code=404, detail="Migração não encontrada.") from None
+
+    healings = meta.get("healings", {})
+    healing = healings.get(healing_id)
+    if healing is None:
+        raise HTTPException(status_code=404, detail="Healing não encontrado.")
+
+    return HealStatusResponse(
+        healing_id=healing_id,
+        migration_id=str(migration_id),
+        status=healing.get("status", "running"),
+        healed=healing.get("healed", False),
+        iterations=healing.get("iterations", 0),
+        strategy=healing.get("strategy", "none"),
+        description=healing.get("description", ""),
+        error=healing.get("error"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _config_to_status_dict(cfg) -> dict:
+    """Converte DatabricksConfig para dict compatível com DatabricksConfigStatus."""
+    raw = cfg.to_dict()
+    # Renomeia 'schema' → 'db_schema' para evitar colisão com BaseModel
+    raw["db_schema"] = raw.pop("schema", "migrated")
+    return raw
+
+
+def _build_validation_response(migration_id: str, validation: dict) -> ValidationResponse:
+    """Constrói ValidationResponse a partir do dict persistido no meta."""
+    report = validation.get("report") or {}
+    summary_data = report.get("summary")
+    tables_data = report.get("tables", [])
+
+    summary = None
+    if summary_data:
+        summary = ValidationSummary(**summary_data)
+
+    tables = [
+        TableValidationResult(**t)
+        for t in tables_data
+    ]
+
+    return ValidationResponse(
+        migration_id=migration_id,
+        validation_status=validation.get("status", "pending"),
+        generated_at=report.get("generated_at"),
+        pipeline=report.get("pipeline"),
+        summary=summary,
+        tables=tables,
     )

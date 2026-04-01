@@ -35,6 +35,12 @@ web = [
     "uvicorn[standard]>=0.30",
     "python-multipart>=0.0.9",
 ]
+databricks = [
+    "databricks-sdk>=0.30",
+]
+all = [
+    "sas2dbx[web,databricks]",
+]
 
 [project.scripts]
 sas2dbx = "sas2dbx.cli:app"

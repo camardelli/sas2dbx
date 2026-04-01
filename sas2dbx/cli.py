@@ -149,7 +149,40 @@ def migrate(
 
     if output:
         console.print(
-            f"\n[dim]--output {output}: geração de notebooks disponível no Sprint 4.[/dim]"
+            f"\n[bold]Iniciando transpilação → {output}[/bold]\n"
+        )
+        from sas2dbx.analyze.dependency import DependencyAnalyzer
+        from sas2dbx.transpile.engine import TranspilationEngine
+
+        autoexec_path = source_dir / "autoexec.sas" if source_dir.is_dir() else None
+        analyzer = DependencyAnalyzer(
+            autoexec_path=autoexec_path if (autoexec_path and autoexec_path.exists()) else None,
+        )
+        graph = analyzer.analyze(sas_files)
+        execution_order = graph.get_execution_order()
+
+        engine = TranspilationEngine(
+            output_dir=output,
+            resume=resume,
+        )
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("{task.completed}/{task.total}"),
+            TimeElapsedColumn(),
+            console=console,
+        ) as progress:
+            eng_task = progress.add_task("Transpilando jobs...", total=len(execution_order))
+            results = engine.run(sas_files, execution_order)
+            progress.update(eng_task, completed=len(execution_order))
+
+        done = sum(1 for r in results if r.status == "done")
+        failed = len(results) - done
+        console.print(
+            f"\nConcluído: [green]{done} transpilado(s)[/green]"
+            + (f" · [red]{failed} com erro[/red]" if failed else "")
         )
 
 
@@ -271,6 +304,46 @@ def validate(
 
     if not report.is_valid:
         raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
+# sas2dbx knowledge status  (K.1)
+# ---------------------------------------------------------------------------
+
+
+@knowledge_app.command(name="status")
+def status_knowledge(
+    base_path: str = typer.Option("./knowledge", "--base-path", help="Raiz do Knowledge Store"),
+) -> None:
+    """Exibe estatísticas do Knowledge Store (entradas, confidence, tokens)."""
+    from sas2dbx.knowledge.manifest import update_from_merged
+
+    with console.status("[bold]Calculando estatísticas do Knowledge Store..."):
+        manifest = update_from_merged(base_path)
+
+    table = Table(title="Knowledge Store — Status", show_header=True)
+    table.add_column("Arquivo", style="cyan")
+    table.add_column("Entradas", justify="right", style="bold")
+
+    total = 0
+    for filename, count in sorted(manifest.get("entries_per_file", {}).items()):
+        table.add_row(filename, str(count))
+        total += count
+    table.add_section()
+    table.add_row("[bold]Total[/bold]", f"[bold]{total}[/bold]")
+
+    console.print(table)
+
+    avg_conf = manifest.get("avg_confidence", 0.0)
+    conf_color = "green" if avg_conf >= 0.8 else ("yellow" if avg_conf >= 0.6 else "red")
+    tokens = manifest.get("tokens_used_total", 0)
+    on_demand = manifest.get("on_demand_harvests", 0)
+    last_updated = manifest.get("last_updated") or "—"
+
+    console.print(f"Confidence médio: [{conf_color}]{avg_conf:.2f}[/{conf_color}]")
+    console.print(f"Tokens consumidos: [dim]{tokens:,}[/dim]")
+    console.print(f"On-demand harvests: [dim]{on_demand}[/dim]")
+    console.print(f"Última atualização: [dim]{last_updated}[/dim]")
 
 
 # ---------------------------------------------------------------------------
@@ -746,6 +819,169 @@ def serve(
         reload=reload,
         log_level="info",
     )
+
+
+# ---------------------------------------------------------------------------
+# sas2dbx validate
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def validate_deploy(
+    output_dir: Path = typer.Argument(..., help="Diretório de saída com notebooks .py gerados"),
+    host: str = typer.Option(
+        None, "--host", envvar="DATABRICKS_HOST", help="URL do workspace Databricks"
+    ),
+    token: str = typer.Option(
+        None, "--token", envvar="DATABRICKS_TOKEN", help="Personal Access Token Databricks"
+    ),
+    catalog: str = typer.Option("main", "--catalog", help="Unity Catalog de destino"),
+    db_schema: str = typer.Option("migrated", "--schema", help="Schema de destino"),
+    node_type_id: str = typer.Option(
+        "i3.xlarge", "--node-type", help="Tipo de nó do cluster de execução"
+    ),
+    spark_version: str = typer.Option(
+        "13.3.x-scala2.12", "--spark-version", help="Databricks Runtime version"
+    ),
+    warehouse_id: str | None = typer.Option(
+        None, "--warehouse-id", envvar="DATABRICKS_WAREHOUSE_ID", help="SQL Warehouse ID"
+    ),
+    deploy_only: bool = typer.Option(
+        False, "--deploy-only", help="Apenas deploy — não executa o workflow"
+    ),
+    collect_only: bool = typer.Option(
+        False, "--collect-only", help="Apenas coleta resultados de tabelas existentes"
+    ),
+    tables: list[str] = typer.Option(
+        None, "--table", "-t", help="Tabelas a validar (repita para múltiplas)"
+    ),
+    report_path: Path | None = typer.Option(
+        None, "--report", "-r", help="Caminho para salvar relatório JSON"
+    ),
+) -> None:
+    """Valida notebooks gerados — deploy para Databricks, executa e coleta resultados."""
+    import json
+
+    try:
+        from sas2dbx.validate.config import DatabricksConfig
+        from sas2dbx.validate.deployer import DatabricksDeployer
+        from sas2dbx.validate.executor import WorkflowExecutor
+        from sas2dbx.validate.collector import DatabricksCollector
+        from sas2dbx.validate.report import generate_validation_report
+    except ImportError:
+        console.print(
+            "[red]Erro: dependências Databricks não instaladas. "
+            "Execute: pip install sas2dbx[databricks][/red]"
+        )
+        raise typer.Exit(1) from None
+
+    if not host or not token:
+        console.print(
+            "[red]Erro: --host/DATABRICKS_HOST e --token/DATABRICKS_TOKEN são obrigatórios.[/red]"
+        )
+        raise typer.Exit(1)
+
+    cfg = DatabricksConfig(
+        host=host.rstrip("/"),
+        token=token,
+        catalog=catalog,
+        schema=db_schema,
+        node_type_id=node_type_id,
+        spark_version=spark_version,
+        warehouse_id=warehouse_id or None,
+    )
+
+    # 1 — Localiza notebooks
+    notebooks = sorted(output_dir.glob("*.py"))
+    if not notebooks:
+        console.print(f"[yellow]Nenhum notebook .py encontrado em {output_dir}[/yellow]")
+        raise typer.Exit(0)
+
+    console.print(
+        f"\n[bold]Validação Databricks[/bold] — {len(notebooks)} notebook(s)\n"
+        f"  Host: [cyan]{cfg.host}[/cyan]  Catalog: [cyan]{cfg.catalog}[/cyan]"
+        f"  Schema: [cyan]{cfg.schema}[/cyan]\n"
+    )
+
+    deployer = DatabricksDeployer(cfg)
+    deploy_results = []
+
+    # 2 — Deploy
+    if not collect_only:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("{task.completed}/{task.total}"),
+            TimeElapsedColumn(),
+            console=console,
+        ) as progress:
+            dep_task = progress.add_task("Fazendo deploy...", total=len(notebooks))
+            for nb in notebooks:
+                try:
+                    dr = deployer.deploy(nb, nb.stem)
+                    deploy_results.append(dr)
+                    progress.advance(dep_task)
+                except Exception as exc:  # noqa: BLE001
+                    console.print(f"  [red]✗[/red] {nb.stem}: {exc}")
+                    progress.advance(dep_task)
+
+        console.print(f"[green]✓[/green] {len(deploy_results)} notebook(s) enviados\n")
+
+        if deploy_only or not deploy_results:
+            if deploy_results:
+                console.print("[dim]--deploy-only: finalizando sem execução.[/dim]")
+            raise typer.Exit(0)
+
+    # 3 — Execução
+    executor = WorkflowExecutor(cfg)
+    exec_results = []
+    if deploy_results:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            TimeElapsedColumn(),
+            console=console,
+        ) as progress:
+            exec_task = progress.add_task("Executando workflows...", total=len(deploy_results))
+            for dr in deploy_results:
+                er = executor.execute(dr.job_id)
+                dr.run_id = er.run_id
+                exec_results.append(er)
+                status_color = "green" if er.status == "SUCCESS" else "red"
+                console.print(
+                    f"  [{status_color}]{'✓' if er.status == 'SUCCESS' else '✗'}[/{status_color}]"
+                    f" job_id={dr.job_id} → {er.status} ({er.duration_ms}ms)"
+                )
+                progress.advance(exec_task)
+
+    # 4 — Coleta de tabelas
+    table_validations = []
+    if tables:
+        collector = DatabricksCollector(cfg)
+        with console.status("[bold]Coletando resultados das tabelas..."):
+            table_validations = collector.collect(list(tables))
+
+        for tv in table_validations:
+            status_str = (
+                f"[green]{tv.row_count} linhas, {tv.column_count} colunas[/green]"
+                if tv.error is None
+                else f"[red]{tv.error}[/red]"
+            )
+            console.print(f"  [cyan]{tv.table_name}[/cyan]: {status_str}")
+
+    # 5 — Relatório
+    if deploy_results and exec_results:
+        # Usa o primeiro deploy+exec como representativo do relatório
+        report = generate_validation_report(deploy_results[0], exec_results[0], table_validations)
+        overall = report["summary"]["overall_status"]
+        status_color = "green" if overall == "success" else ("yellow" if overall == "partial" else "red")
+        console.print(f"\nStatus geral: [{status_color}]{overall.upper()}[/{status_color}]")
+
+        if report_path:
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+            console.print(f"[green]✓[/green] Relatório salvo em [cyan]{report_path}[/cyan]")
 
 
 @app.command()

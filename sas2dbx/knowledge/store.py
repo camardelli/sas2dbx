@@ -83,6 +83,10 @@ class KnowledgeStore:
         """Lookup a SAS format → Python/Spark format mapping."""
         return self._lookup_in_mapping("formats_map.yaml", format_name.upper())
 
+    def lookup_informat(self, informat_name: str) -> dict[str, Any] | None:
+        """Lookup a SAS informat → Python/Spark mapping."""
+        return self._lookup_in_mapping("informats_map.yaml", informat_name.upper())
+
     # -------------------------------------------------------------------------
     # Lookup com fallback on-demand (H.2)
     # -------------------------------------------------------------------------
@@ -127,7 +131,7 @@ class KnowledgeStore:
 
     def lookup_informat_or_harvest(self, informat_name: str) -> dict[str, Any] | None:
         """Lookup de informat SAS com harvest on-demand se não encontrado."""
-        result = self._lookup_in_mapping("informats_map.yaml", informat_name.upper())
+        result = self.lookup_informat(informat_name)
         if result is not None:
             return result
         return self._on_demand_harvest("informat", informat_name.upper(), "informats_map.yaml")
@@ -181,6 +185,55 @@ class KnowledgeStore:
             with open(custom_file, encoding="utf-8") as f:
                 return yaml.safe_load(f) or {}
         return {}
+
+    # -------------------------------------------------------------------------
+    # Async-native lookups (A.1) — para uso em contextos async (FastAPI/uvicorn)
+    # -------------------------------------------------------------------------
+
+    async def alookup_function_or_harvest(self, func_name: str) -> dict[str, Any] | None:
+        """Versão async de lookup_function_or_harvest — não usa _run_sync()."""
+        result = self.lookup_function(func_name)
+        if result is not None:
+            return result
+        return await self._on_demand_harvest_async(
+            "function", func_name.upper(), "functions_map.yaml"
+        )
+
+    async def alookup_proc_or_harvest(self, proc_name: str) -> dict[str, Any] | None:
+        """Versão async de lookup_proc_or_harvest."""
+        result = self.lookup_proc(proc_name)
+        if result is not None:
+            return result
+        return await self._on_demand_harvest_async(
+            "proc", proc_name.upper(), "proc_map.yaml"
+        )
+
+    async def alookup_sql_dialect_or_harvest(self, construct: str) -> dict[str, Any] | None:
+        """Versão async de lookup_sql_dialect_or_harvest."""
+        result = self.lookup_sql_dialect(construct)
+        if result is not None:
+            return result
+        return await self._on_demand_harvest_async(
+            "sql_dialect", construct.upper(), "sql_dialect_map.yaml"
+        )
+
+    async def alookup_format_or_harvest(self, format_name: str) -> dict[str, Any] | None:
+        """Versão async de lookup_format_or_harvest."""
+        result = self.lookup_format(format_name)
+        if result is not None:
+            return result
+        return await self._on_demand_harvest_async(
+            "format", format_name.upper(), "formats_map.yaml"
+        )
+
+    async def alookup_informat_or_harvest(self, informat_name: str) -> dict[str, Any] | None:
+        """Versão async de lookup_informat_or_harvest."""
+        result = self.lookup_informat(informat_name)
+        if result is not None:
+            return result
+        return await self._on_demand_harvest_async(
+            "informat", informat_name.upper(), "informats_map.yaml"
+        )
 
     # -------------------------------------------------------------------------
     # Internal
@@ -317,3 +370,55 @@ class KnowledgeStore:
                 sort_keys=True,
             )
         os.replace(tmp, path)
+
+    async def _on_demand_harvest_async(
+        self,
+        category: str,
+        key: str,
+        filename: str,
+    ) -> dict[str, Any] | None:
+        """Versão async de _on_demand_harvest — chama harvest_single() diretamente.
+
+        Evita _run_sync() / ThreadPoolExecutor — adequado para contextos async nativos.
+        """
+        if self._llm_client is None:
+            return None
+
+        cache_key = f"{category}:{key}"
+        if cache_key in self._harvest_attempted:
+            return None
+
+        self._harvest_attempted.add(cache_key)
+
+        logger.info(
+            "KnowledgeStore: async harvest para %s '%s'...", category, key
+        )
+
+        try:
+            from sas2dbx.knowledge.populate.llm_harvester import LLMSingleHarvester
+
+            harvester = LLMSingleHarvester(self._llm_client)
+            entry = await harvester.harvest_single(category=category, key=key)
+
+            if entry is None:
+                logger.warning(
+                    "KnowledgeStore: async harvest retornou None para %s '%s'",
+                    category, key,
+                )
+                return None
+
+            self._append_to_generated(filename, key, entry)
+            self.invalidate_cache()
+
+            logger.info(
+                "KnowledgeStore: async harvest OK — %s '%s' (confidence=%.2f)",
+                category, key, entry.get("confidence", 0),
+            )
+            return entry
+
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "KnowledgeStore: async harvest falhou para %s '%s': %s",
+                category, key, exc,
+            )
+            return None

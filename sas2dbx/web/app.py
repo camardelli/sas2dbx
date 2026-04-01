@@ -71,6 +71,19 @@ def create_app(
     app.state.max_upload_bytes = resolved_max_mb * 1024 * 1024
     app.state.work_dir = Path(resolved_work_dir)
 
+    # Sprint 8: DatabricksConfig opcional (None se variáveis ausentes)
+    dbx_config = None
+    try:
+        from sas2dbx.validate.config import DatabricksConfig
+        if os.environ.get("DATABRICKS_HOST") and os.environ.get("DATABRICKS_TOKEN"):
+            dbx_config = DatabricksConfig.from_env()
+            logger.info("App: DatabricksConfig carregada do ambiente (%s)", dbx_config.host)
+    except ImportError:
+        logger.debug("App: databricks-sdk não instalado — validação Databricks indisponível")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("App: falha ao carregar DatabricksConfig do ambiente: %s", exc)
+    app.state.databricks_config = dbx_config
+
     # API routes
     app.include_router(router, prefix="/api")
 
