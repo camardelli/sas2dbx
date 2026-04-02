@@ -506,11 +506,27 @@ class NotebookFixer:
                 r'spark\.read\.table\(["\']([^"\']+)["\']\)',
                 re.IGNORECASE,
             )
-            tables = list(dict.fromkeys(read_pattern.findall(content)))  # preserva ordem, deduplica
+            # Filtra nomes de tabela inválidos (LLM placeholders) antes de emitir ALTER TABLE.
+            # Tabelas com <>, sufixos genéricos ou sem schema qualificado são ruído.
+            _INVALID_TABLE_TOKENS = frozenset({
+                "minha_tabela", "nome_tabela", "tabela", "table_name",
+                "schema_name", "catalog_name", "nome_da_tabela",
+            })
+            raw_tables = read_pattern.findall(content)
+            tables = []
+            for t in dict.fromkeys(raw_tables):  # preserva ordem, deduplica
+                table_simple = t.split(".")[-1].lower()
+                if "<" in t or ">" in t:
+                    logger.debug("Fixer: tabela placeholder inválida ignorada: %s", t)
+                    continue
+                if table_simple in _INVALID_TABLE_TOKENS:
+                    logger.debug("Fixer: nome genérico de tabela ignorado: %s", t)
+                    continue
+                tables.append(t)
             logger.info(
                 "Fixer._fix_placeholder_add_column: CREATE TABLE não encontrado — "
-                "usando %d tabela(s) de read.table como candidatas",
-                len(tables),
+                "usando %d/%d tabela(s) de read.table como candidatas (após filtro)",
+                len(tables), len(raw_tables),
             )
 
         if not tables:

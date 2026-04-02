@@ -49,8 +49,14 @@ def create_app(
     """
     from sas2dbx.transpile.llm.client import LLMConfig
     from sas2dbx.web.api.routes import router
+    from sas2dbx.web.log_buffer import LogBuffer
     from sas2dbx.web.storage import MigrationStorage
     from sas2dbx.web.worker import MigrationWorker
+
+    # Instala buffer de log em memória ANTES de qualquer outro import
+    # para capturar todos os logs da aplicação desde o início.
+    log_buf = LogBuffer(maxlen=500)
+    log_buf.install(level=logging.DEBUG)
 
     resolved_work_dir = (
         work_dir if work_dir is not None else os.environ.get("WORK_DIR", _DEFAULT_WORK_DIR)
@@ -76,6 +82,7 @@ def create_app(
     app.state.worker = MigrationWorker(storage=storage, llm_config=llm_config)
     app.state.max_upload_bytes = resolved_max_mb * 1024 * 1024
     app.state.work_dir = Path(resolved_work_dir)
+    app.state.log_buffer = log_buf
 
     # Sprint 8: DatabricksConfig opcional (None se variáveis ausentes)
     dbx_config = None

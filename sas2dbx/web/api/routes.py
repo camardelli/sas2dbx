@@ -544,6 +544,38 @@ async def get_healing_status(
 
 
 # ---------------------------------------------------------------------------
+# Log streaming API — polling de logs em tempo real
+# ---------------------------------------------------------------------------
+
+
+@router.get("/logs")
+async def get_logs(request: Request, since: int = 0, limit: int = 200):
+    """Retorna entradas de log novas desde `since` (ms epoch UTC).
+
+    O frontend faz polling a cada 1.5s passando o ts_ms da última entrada
+    recebida. Retorna no máximo `limit` entradas em ordem cronológica.
+
+    Args:
+        since: Timestamp de corte em ms epoch (0 = todas).
+        limit: Máximo de entradas retornadas (max 500).
+
+    Returns:
+        {"entries": [...], "server_ts_ms": <now_ms>}
+    """
+    import time
+
+    buf = getattr(request.app.state, "log_buffer", None)
+    if buf is None:
+        return {"entries": [], "server_ts_ms": int(time.time() * 1000)}
+
+    entries = buf.since(ts_ms=since, limit=min(limit, 500))
+    return {
+        "entries": entries,
+        "server_ts_ms": int(time.time() * 1000),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Evolution API — Sprint 10
 # ---------------------------------------------------------------------------
 
