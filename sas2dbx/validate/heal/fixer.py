@@ -24,6 +24,7 @@ _HANDLERS: dict[str, str] = {
     "fix_stack_type_mismatch": "_fix_stack_type_mismatch",
     "fix_when_otherwise_type": "_fix_when_otherwise_type",
     "fix_function_not_found": "_fix_function_not_found",
+    "fix_parse_syntax_if_not_exists": "_fix_parse_syntax_if_not_exists",
 }
 
 # Mapeamento de funções SQL SAS/não-suportadas → equivalente Spark SQL.
@@ -562,6 +563,24 @@ class NotebookFixer:
             f"Coluna '{missing_column}' adicionada via ALTER TABLE em "
             f"{len(tables)} placeholder(s): {', '.join(tables)}"
         )
+
+    def _fix_parse_syntax_if_not_exists(
+        self, notebook_path: Path, entities: dict[str, str]
+    ) -> str:
+        """Handler para PARSE_SYNTAX_ERROR causado por ADD COLUMN IF NOT EXISTS.
+
+        Delega ao static_validator que tem o fixer completo para esse padrão,
+        garantindo que o notebook seja corrigido antes do próximo retest.
+        """
+        from sas2dbx.validate.heal.static_validator import StaticNotebookValidator
+        validator = StaticNotebookValidator(
+            catalog=entities.get("catalog", ""),
+            schema=entities.get("schema", ""),
+        )
+        report = validator.validate_notebook(notebook_path)
+        if report.changed:
+            return f"PARSE_SYNTAX_ERROR/EXISTS corrigido via static_validator: {'; '.join(report.fixes)}"
+        return "PARSE_SYNTAX_ERROR/EXISTS: padrão IF NOT EXISTS não encontrado no notebook — verificar manualmente"
 
     def _fix_stack_type_mismatch(
         self, notebook_path: Path, entities: dict[str, str]

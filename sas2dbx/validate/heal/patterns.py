@@ -102,6 +102,16 @@ ERROR_PATTERNS: dict[str, ErrorPattern] = {
         "deterministic_fix": "fix_function_not_found",
         "severity": "HIGH",
     },
+    "parse_syntax_exists": {
+        "pattern": re.compile(
+            r"PARSE_SYNTAX_ERROR.*EXISTS"
+            r"|Syntax error at or near 'EXISTS'",
+            re.IGNORECASE,
+        ),
+        "category": "parse_syntax_if_not_exists",
+        "deterministic_fix": "fix_parse_syntax_if_not_exists",
+        "severity": "CRITICAL",
+    },
     "import_error": {
         "pattern": re.compile(
             r"ModuleNotFoundError: No module named '([\w.]+)'"

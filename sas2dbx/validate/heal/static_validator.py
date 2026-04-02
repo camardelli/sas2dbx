@@ -662,25 +662,31 @@ class StaticNotebookValidator:
         Substitui por bloco try/except Python que absorve o erro quando a coluna
         já existe, tornando a operação idempotente.
 
-        Padrão detectado (gerado por healing de sessões anteriores):
+        Também filtra nomes de tabela inválidos (placeholders como <tabela>) que
+        o LLM gera quando não consegue resolver o nome real — esses ALTER TABLE
+        nunca funcionariam e devem ser removidos.
+
+        Padrões detectados:
+            spark.sql("ALTER TABLE t ADD COLUMN IF NOT EXISTS col STRING")
             spark.sql("ALTER TABLE t ADD COLUMN IF NOT EXISTS `col` STRING")
-        Substituído por:
-            try:
-                spark.sql("ALTER TABLE t ADD COLUMNS (`col` STRING)")
-            except Exception:
-                pass  # coluna já existe
         """
+        # Regex flexível: sem/com backticks, ADD COLUMN ou ADD COLUMNS
+        # Nomes de tabela: qualquer sequência sem aspas duplas (inclui <placeholder>)
         pattern = re.compile(
-            r'spark\.sql\("ALTER TABLE ([\w.]+) ADD COLUMNS? IF NOT EXISTS `(\w+)` (\w+)"\)',
+            r'spark\.sql\("ALTER TABLE ([^"]+?) ADD COLUMNS? IF NOT EXISTS [`]?(\w+)[`]? (\w+)"\)',
             re.IGNORECASE,
         )
 
-        count = len(pattern.findall(content))
-        if not count:
-            return content, None
+        valid_replacements = []
+        invalid_removals = []
 
         def _replace(m: re.Match) -> str:
-            table, col, dtype = m.group(1), m.group(2), m.group(3)
+            table, col, dtype = m.group(1).strip(), m.group(2), m.group(3)
+            # Remove placeholders inválidos gerados pelo LLM (<tabela>, <nome_da_tabela>)
+            if "<" in table or ">" in table or table in ("minha_tabela", "nome_tabela", "tabela"):
+                invalid_removals.append(f"{table}.{col}")
+                return f"# [REMOVIDO] ALTER TABLE inválido: tabela placeholder '{table}' não existe"
+            valid_replacements.append(f"{table}.{col}")
             return (
                 f'try:\n'
                 f'    spark.sql("ALTER TABLE {table} ADD COLUMNS (`{col}` {dtype})")\n'
@@ -688,8 +694,18 @@ class StaticNotebookValidator:
                 f'    pass  # coluna já existe'
             )
 
-        content = pattern.sub(_replace, content)
-        return content, f"ALTER TABLE IF NOT EXISTS → try/except em {count} ocorrência(s)"
+        new_content = pattern.sub(_replace, content)
+        count = len(valid_replacements) + len(invalid_removals)
+        if not count:
+            return content, None
+
+        parts = []
+        if valid_replacements:
+            parts.append(f"ALTER TABLE IF NOT EXISTS → try/except em {len(valid_replacements)} ocorrência(s)")
+        if invalid_removals:
+            parts.append(f"removidos {len(invalid_removals)} ALTER TABLE com tabela placeholder inválida")
+
+        return new_content, "; ".join(parts)
 
     def _deduplicate_imports(self, content: str) -> tuple[str, str | None]:
         """Remove linhas de import duplicadas mantendo a primeira ocorrência."""
