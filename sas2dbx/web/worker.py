@@ -206,6 +206,18 @@ class MigrationWorker:
                     notebook=body.notebook_name,
                 )
 
+            # Sprint 10 — Self-Evolution: se healing falhou, aciona EvolutionEngine
+            if not report.healed and self._llm_config.api_key:
+                self._try_evolve(
+                    migration_id=migration_id,
+                    healing_id=healing_id,
+                    notebook_path=notebook_path,
+                    healing_report=report,
+                    notebook_name=body.notebook_name,
+                    healing_data=healing_data,
+                    save_fn=_save_healing,
+                )
+
             logger.info(
                 "MigrationWorker[heal %s]: concluído healed=%s iterations=%d static_fixes=%d",
                 healing_id, report.healed, report.iterations, report.static_fixes_applied,
@@ -439,6 +451,87 @@ class MigrationWorker:
                 "notebook_results": notebook_results,
             }
             self._storage.save_meta(migration_id, meta)
+
+    # ------------------------------------------------------------------
+    # Evolution Engine
+    # ------------------------------------------------------------------
+
+    def _get_evolution_engine(self):
+        """Constrói EvolutionEngine com LLMClient e HealthMonitor compartilhado."""
+        from sas2dbx.evolve.engine import EvolutionEngine
+        from sas2dbx.evolve.health import HealthMonitor
+        from sas2dbx.transpile.llm.client import LLMClient
+
+        llm = LLMClient(self._llm_config)
+        project_root = Path(__file__).resolve().parents[2]
+        health_path = self._storage.work_dir / "catalog" / "health_snapshots.json"
+        health = HealthMonitor(health_path)
+        return EvolutionEngine(
+            llm_client=llm,
+            project_root=project_root,
+            health_monitor=health,
+            unresolved_dir=self._storage.work_dir / "catalog" / "unresolved",
+        )
+
+    def _try_evolve(
+        self,
+        migration_id: str,
+        healing_id: str,
+        notebook_path: Path,
+        healing_report,
+        notebook_name: str,
+        healing_data: dict,
+        save_fn,
+    ) -> None:
+        """Aciona o EvolutionEngine quando healing falha. Não bloqueia — fire-and-forget."""
+        from sas2dbx.evolve.unresolved import UnresolvedError
+
+        logger.info(
+            "MigrationWorker[heal %s]: healing falhou — acionando EvolutionEngine",
+            healing_id,
+        )
+
+        try:
+            error = UnresolvedError.from_healing_report(
+                job_id=notebook_name,
+                migration_id=migration_id,
+                notebook_path=notebook_path,
+                healing_report=healing_report,
+                construct_type="UNKNOWN",
+            )
+
+            engine = self._get_evolution_engine()
+            result = engine.process(error)
+
+            # Atualiza healing_data com resultado da evolução
+            healing_data["evolution"] = {
+                "proposal_generated": result.proposal_generated,
+                "gate_decision": result.gate_decision,
+                "applied": result.applied,
+                "quarantine_entry_id": result.quarantine_entry_id,
+                "fix_type": result.fix_type,
+                "risk_level": result.risk_level,
+                "description": result.description,
+                "elapsed_seconds": round(result.elapsed_seconds, 2),
+            }
+            save_fn(healing_data)
+
+            logger.info(
+                "MigrationWorker[heal %s]: evolution concluído — gate=%s applied=%s",
+                healing_id, result.gate_decision, result.applied,
+            )
+
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "MigrationWorker[heal %s]: EvolutionEngine falhou (não crítico): %s",
+                healing_id, exc,
+            )
+            healing_data["evolution"] = {"error": str(exc)}
+            save_fn(healing_data)
+
+    # ------------------------------------------------------------------
+    # Main pipeline
+    # ------------------------------------------------------------------
 
     def _run(self, migration_id: str) -> None:
         """Ponto de entrada da thread — captura exceções de infraestrutura."""

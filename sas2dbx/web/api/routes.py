@@ -544,6 +544,94 @@ async def get_healing_status(
 
 
 # ---------------------------------------------------------------------------
+# Evolution API — Sprint 10
+# ---------------------------------------------------------------------------
+
+
+@router.get("/evolution/health")
+async def get_evolution_health(request: Request):
+    """Retorna snapshots de saúde do pipeline de evolução."""
+    storage: MigrationStorage = request.app.state.storage
+    health_path = storage.work_dir / "catalog" / "health_snapshots.json"
+    if not health_path.exists():
+        return {"snapshots": [], "latest": None}
+    import json
+    snapshots = json.loads(health_path.read_text(encoding="utf-8"))
+    latest = snapshots[-1] if snapshots else None
+    return {"snapshots": snapshots, "latest": latest}
+
+
+@router.get("/evolution/quarantine")
+async def list_quarantine(request: Request):
+    """Lista fixes em quarentena aguardando aprovação humana."""
+    from sas2dbx.evolve.quarantine import QuarantineStore
+
+    storage: MigrationStorage = request.app.state.storage
+    store = QuarantineStore(storage.work_dir / "catalog" / "quarantine.json")
+    return {"pending": store.list_pending(), "count": store.count_pending()}
+
+
+@router.post("/evolution/quarantine/{entry_id}/approve")
+async def approve_quarantine(entry_id: str, request: Request):
+    """Aprova um fix em quarentena e o aplica no código-fonte."""
+    from sas2dbx.evolve.quarantine import QuarantineStore
+    from sas2dbx.evolve.gate import QualityGate
+    from sas2dbx.evolve.applier import FixApplier
+    from pathlib import Path
+
+    storage: MigrationStorage = request.app.state.storage
+    store = QuarantineStore(storage.work_dir / "catalog" / "quarantine.json")
+    body = await request.json() if request.headers.get("content-type") == "application/json" else {}
+    note = body.get("note", "") if isinstance(body, dict) else ""
+
+    proposal = store.approve(entry_id, note=note)
+    if not proposal:
+        raise HTTPException(status_code=404, detail=f"Entrada {entry_id} não encontrada.")
+
+    # Aplica o fix aprovado
+    project_root = Path(__file__).resolve().parents[3]
+    applier = FixApplier(
+        project_root,
+        history_path=storage.work_dir / "catalog" / "evolution_history.json",
+    )
+    result = applier.apply(proposal)
+    return {
+        "entry_id": entry_id,
+        "status": result.status,
+        "files_modified": result.files_modified,
+        "hot_reloaded": result.hot_reloaded,
+    }
+
+
+@router.post("/evolution/quarantine/{entry_id}/reject")
+async def reject_quarantine(entry_id: str, request: Request):
+    """Rejeita um fix em quarentena."""
+    from sas2dbx.evolve.quarantine import QuarantineStore
+
+    storage: MigrationStorage = request.app.state.storage
+    store = QuarantineStore(storage.work_dir / "catalog" / "quarantine.json")
+    body = await request.json() if request.headers.get("content-type") == "application/json" else {}
+    note = body.get("note", "") if isinstance(body, dict) else ""
+
+    ok = store.reject(entry_id, note=note)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"Entrada {entry_id} não encontrada.")
+    return {"entry_id": entry_id, "status": "REJECTED"}
+
+
+@router.get("/evolution/history")
+async def get_evolution_history(request: Request):
+    """Retorna histórico de fixes aplicados pelo Evolution Engine."""
+    storage: MigrationStorage = request.app.state.storage
+    history_path = storage.work_dir / "catalog" / "evolution_history.json"
+    if not history_path.exists():
+        return {"fixes": []}
+    import json
+    fixes = json.loads(history_path.read_text(encoding="utf-8"))
+    return {"fixes": fixes, "total": len(fixes)}
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
