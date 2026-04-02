@@ -256,7 +256,10 @@ class MigrationWorker:
 
         migration_dir = self._storage.get_migration_dir(migration_id)
         output_dir = migration_dir / "output"
-        notebooks = sorted(output_dir.glob("*.py"))
+        notebooks = sorted(
+            nb for nb in output_dir.glob("*.py")
+            if not nb.stem.endswith("_reconciliation")
+        )
 
         # H1 — Pré-validação estática: corrige padrões conhecidos antes do deploy
         # GAP-6: passa healing_history para que fixes conhecidos de sessões anteriores
