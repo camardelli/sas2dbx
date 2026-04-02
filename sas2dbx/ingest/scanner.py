@@ -54,6 +54,10 @@ def scan_directory(
     for candidate in candidates:
         if not candidate.is_file():
             continue
+        # Ignora resource forks do macOS (._filename)
+        if candidate.name.startswith("._"):
+            logger.debug("Scanner: ignorando resource fork macOS %s", candidate.name)
+            continue
         if _is_excluded(candidate, root, exclude_patterns):
             logger.debug("Scanner: excluindo %s", candidate)
             continue

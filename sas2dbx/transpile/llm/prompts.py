@@ -18,10 +18,17 @@ REGRAS:
 2. Use spark.sql() para PROC SQL — adapte sintaxe SAS SQL para Spark SQL
 3. Preserve a lógica exata — mesmos filtros, joins, transformações
 4. Adicione comentários explicando cada transformação principal
-5. Use F.col() para referências de colunas (import pyspark.sql.functions as F)
-6. Para datasets SAS, use spark.read.table("{catalog}.{schema}.<tabela>")
-7. Para output datasets, use .write.mode("overwrite").saveAsTable("{catalog}.{schema}.<tabela>")
-8. Se encontrar construto que NÃO consegue converter com certeza, retorne:
+5. SEMPRE inclua os imports necessários no topo do código gerado:
+   import pyspark.sql.functions as F
+   from pyspark.sql.window import Window  (somente se usar Window)
+6. Use F.col() para referências de colunas, NUNCA df["col"]
+7. Para datasets SAS, use spark.read.table("{catalog}.{schema}.<tabela>")
+8. Para output datasets, use .write.mode("overwrite").saveAsTable("{catalog}.{schema}.<tabela>")
+9. Para macro-variáveis SAS (&VAR): converta como variável Python com valor padrão hardcoded.
+   NUNCA use spark.conf.get() sem prefixo "spark." — isso causa CONFIG_NOT_AVAILABLE no serverless.
+   Correto: DT_REFERENCIA = "2024-01-01"  # ajustar conforme necessário
+   Errado:  DT_REFERENCIA = spark.conf.get("DT_REFERENCIA")
+10. Se encontrar construto que NÃO consegue converter com certeza, retorne:
    # WARNING: [tipo_construto] na linha [N] requer revisão manual
    # SAS original: [código]
 
@@ -38,6 +45,62 @@ BLOCO SAS ({construct_type}):
 
 Responda APENAS com o código PySpark. Sem explicações fora dos comentários inline.\
 """
+
+# ---------------------------------------------------------------------------
+# Dicas especializadas por construct type
+# ---------------------------------------------------------------------------
+
+_CONSTRUCT_HINTS: dict[str, str] = {
+    "PROC_TRANSPOSE": """\
+DICA PROC TRANSPOSE: Converta para PySpark usando stack() + selectExpr() ou melt().
+- PROC TRANSPOSE BY var → groupBy(var) antes do pivot
+- VAR lista → colunas a pivotar
+- ID col → nomes das colunas novas (stack → nome da coluna _NAME_ vira coluna)
+- Sem ID → resultado tem colunas COL1, COL2... → renomear depois
+- Padrão unpivot (wide→long): df.selectExpr("id", "stack(N, 'col1', col1, 'col2', col2) as (variable, value)")
+- Padrão pivot (long→wide): df.groupBy("id").pivot("variable").agg(F.first("value"))
+""",
+    "PROC_REPORT": """\
+DICA PROC REPORT: Converta para agregação PySpark + display/saveAsTable.
+- COLUMN lista → colunas a exibir; sem estatística = passthrough (select)
+- DEFINE var / ANALYSIS MEAN|SUM|N → .groupBy().agg(F.mean(), F.sum(), F.count())
+- DEFINE var / GROUP → chave de agrupamento (groupBy)
+- DEFINE var / DISPLAY → coluna de detalhe (sem agregação)
+- ORDER= → .orderBy()
+- Output: salvar com saveAsTable(); resultado pode ter subtotais → union com totais se necessário
+""",
+    "HASH_OBJECT": """\
+DICA HASH OBJECT: Converta para broadcast join no PySpark.
+- hash h() → instanciar dataset pequeno em memória para lookup rápido
+- h.defineKey('key_col') + h.defineData('val_col') → chave e valor do lookup
+- h.find() → equivale a LEFT JOIN no DataFrame (ou quando em loop, broadcast join)
+- Padrão: df_main.join(F.broadcast(df_lookup), on="key_col", how="left")
+- Se hash usado dentro de loop/array: considerar criar dict via collectAsMap() para lookup local
+""",
+    "DATA_STEP_COMPLEX": """\
+DICA DATA STEP COMPLEX: Construto com ARRAY, RETAIN ou BY-group processing.
+- ARRAY arr{n} vars → list de colunas; iterar com loop → usar F.col() em sequência ou stack
+- RETAIN var → WindowSpec com rowsBetween para carry-forward; ou acumulador com Window.unboundedPreceding
+- BY group (first./last.) → Window partitionBy + row_number() para detectar first/last
+- OUTPUT dentro de loop → union de DataFrames ou explode
+""",
+    "MACRO_SIMPLE": """\
+DICA MACRO SIMPLE: Converta %macro/%mend para função Python def.
+- Parâmetros %macro name(p1, p2) → def name(p1, p2, spark=None):
+- %let var = valor → variável local Python
+- &var → f-string ou parâmetro da função
+- Chamadas a PROC/DATA dentro da macro → chamar sub-funções Python
+- Retorne o DataFrame resultante ou None se a macro apenas persiste dados
+""",
+    "PROC_MEANS": """\
+DICA PROC MEANS/SUMMARY: Converta para groupBy().agg().
+- VAR lista → colunas a agregar
+- CLASS vars → groupBy(vars)
+- Sem CLASS → agregação global: df.agg(...)
+- OUTPUT OUT= com stat= → adicionar .withColumnRenamed() para nomear métricas
+- Estatísticas: N→count, MEAN→mean, STD→stddev, MIN→min, MAX→max, SUM→sum, MEDIAN→percentile_approx(col, 0.5)
+""",
+}
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -69,6 +132,11 @@ def build_transpile_prompt(
             "REFERÊNCIA TÉCNICA (do Knowledge Store — use como ground truth):\n"
             f"{context_text}\n\n"
         )
+
+    # Injetar dica especializada por construct type, se disponível
+    hint = _CONSTRUCT_HINTS.get(construct_type, "")
+    if hint:
+        context_section += hint + "\n"
 
     # Usar .replace() em vez de .format() para evitar KeyError/IndexError
     # quando código SAS contém { } (macros, strings literais, hash objects, etc.)

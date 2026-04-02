@@ -80,8 +80,8 @@ async def create_migration(
     file: UploadFile = File(..., description="Arquivo .zip com os jobs .sas"),
     autoexec_filename: str = Form(default="autoexec.sas"),
     encoding: str = Form(default="auto"),
-    catalog: str = Form(default="main"),
-    db_schema: str = Form(default="migrated"),
+    catalog: str = Form(default=""),
+    db_schema: str = Form(default=""),
 ) -> MigrationResponse:
     """Recebe o .zip, cria a migração e retorna o migration_id.
 
@@ -90,6 +90,13 @@ async def create_migration(
     """
     storage = _storage(request)
     max_bytes = _max_upload_bytes(request)
+
+    # Usa catalog/schema do DatabricksConfig se não fornecidos explicitamente
+    dbx = _dbx_config(request)
+    if not catalog:
+        catalog = dbx.catalog if dbx else "main"
+    if not db_schema:
+        db_schema = dbx.schema if dbx else "migrated"
 
     # Valida content-type
     if file.content_type not in ("application/zip", "application/x-zip-compressed"):
@@ -186,6 +193,29 @@ async def get_migration_status(
         jobs=jobs,
         error=data.get("error"),
     )
+
+
+# ---------------------------------------------------------------------------
+# DELETE /migrations/{migration_id}
+# ---------------------------------------------------------------------------
+
+
+@router.delete("/migrations/{migration_id}", status_code=204)
+async def delete_migration(
+    migration_id: UUID,
+    request: Request,
+) -> None:
+    """Remove todos os artefatos de uma migração.
+
+    Permite ao usuário descartar uma migração com ZIP incorreto e fazer
+    um novo upload. Retorna 204 No Content em caso de sucesso.
+    """
+    storage = _storage(request)
+    try:
+        storage.delete_migration(str(migration_id))
+    except MigrationNotFoundError:
+        raise HTTPException(status_code=404, detail="Migração não encontrada.") from None
+    logger.info("DELETE /migrations/%s: removida", migration_id)
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +405,10 @@ async def start_validation(
     if meta["status"] != "done":
         raise HTTPException(status_code=409, detail="Migração ainda não concluída.")
 
+    # Limpa resultado anterior (retry) para que o polling não leia estado antigo
+    meta["validation"] = {"status": "running"}
+    storage.save_meta(str(migration_id), meta)
+
     # Dispara validação em background
     worker = request.app.state.worker
     worker.start_validation(str(migration_id), cfg, body.tables, body.deploy_only, body.collect_only)
@@ -527,15 +561,13 @@ def _build_validation_response(migration_id: str, validation: dict) -> Validatio
     report = validation.get("report") or {}
     summary_data = report.get("summary")
     tables_data = report.get("tables", [])
+    notebook_results = report.get("notebooks") or validation.get("notebook_results", [])
 
     summary = None
     if summary_data:
         summary = ValidationSummary(**summary_data)
 
-    tables = [
-        TableValidationResult(**t)
-        for t in tables_data
-    ]
+    tables = [TableValidationResult(**t) for t in tables_data]
 
     return ValidationResponse(
         migration_id=migration_id,
@@ -543,5 +575,7 @@ def _build_validation_response(migration_id: str, validation: dict) -> Validatio
         generated_at=report.get("generated_at"),
         pipeline=report.get("pipeline"),
         summary=summary,
+        notebook_results=notebook_results,
         tables=tables,
+        error=validation.get("error"),
     )

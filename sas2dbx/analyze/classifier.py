@@ -33,12 +33,14 @@ SUPPORTED_CONSTRUCTS: dict[str, Tier] = {
     "MACRO_SIMPLE": Tier.LLM,        # %macro/%mend sem recursão/geração dinâmica
     # Invocação de macro do usuário (standalone %name(...))
     "MACRO_INVOCATION": Tier.LLM,
+    # Tier 2 — LLM-assisted (adicionados)
+    "PROC_TRANSPOSE": Tier.LLM,      # pivot/unpivot → stack() / selectExpr()
+    "PROC_REPORT": Tier.LLM,         # relatório tabular → display() + saveAsTable()
+    "HASH_OBJECT": Tier.LLM,         # lookup rápido → broadcast join
     # Tier 3 — manual flag (sem transpilação automática, preserva SAS original)
     "PROC_FORMAT": Tier.MANUAL,
-    "PROC_REPORT": Tier.MANUAL,
     "PROC_TABULATE": Tier.MANUAL,
     "MACRO_DYNAMIC": Tier.MANUAL,    # CALL EXECUTE, %SYSFUNC, geração dinâmica
-    "HASH_OBJECT": Tier.MANUAL,
     "UNKNOWN": Tier.MANUAL,          # default para qualquer construct não reconhecido
 }
 
@@ -131,7 +133,6 @@ def _detect_construct(block: str) -> str:
     Retorna sempre uma chave válida de SUPPORTED_CONSTRUCTS.
     """
     stripped = block.strip()
-    stripped.upper()
 
     # LIBNAME (antes de PROC/DATA para evitar colisão)
     if re.match(r"^\s*LIBNAME\s+", stripped, re.IGNORECASE):
@@ -181,6 +182,7 @@ def _classify_proc(proc_name: str, block: str) -> str:
         "FORMAT": "PROC_FORMAT",
         "REPORT": "PROC_REPORT",
         "TABULATE": "PROC_TABULATE",
+        "TRANSPOSE": "PROC_TRANSPOSE",
     }
     return mapping.get(proc_name, "UNKNOWN")
 

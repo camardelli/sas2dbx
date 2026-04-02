@@ -74,6 +74,9 @@ _RE_SQL_CREATE = re.compile(
     r"\bCREATE\s+(?:OR\s+REPLACE\s+)?TABLE\s+" + _DS_NAME, re.IGNORECASE
 )
 
+# PROC SQL: INSERT INTO
+_RE_SQL_INSERT = re.compile(r"\bINSERT\s+INTO\s+" + _DS_NAME, re.IGNORECASE)
+
 # Macro definition
 _RE_MACRO_DEF = re.compile(r"^\s*%MACRO\s+(\w+)", re.IGNORECASE | re.MULTILINE)
 
@@ -153,6 +156,11 @@ def extract_block_deps(block: SASBlock | str) -> BlockDeps:
 def _extract_sql_deps(code: str, deps: BlockDeps) -> None:
     """Extrai inputs/outputs de um bloco PROC SQL."""
     for m in _RE_SQL_CREATE.finditer(code):
+        ds = _normalize_ds(m.group(1))
+        if ds and ds not in deps.outputs:
+            deps.outputs.append(ds)
+
+    for m in _RE_SQL_INSERT.finditer(code):
         ds = _normalize_ds(m.group(1))
         if ds and ds not in deps.outputs:
             deps.outputs.append(ds)

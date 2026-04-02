@@ -198,6 +198,7 @@ class StaticNotebookValidator:
             self._fix_monotonic_function,       # GAP-8a
             self._fix_numeric_string_comparison, # GAP-8b
             self._fix_sas_date_literals,         # GAP-8c
+            self._fix_alter_table_if_not_exists, # sintaxe inválida no Databricks SQL
             self._deduplicate_imports,
         ]
         for fixer_fn in _fixers:
@@ -653,6 +654,42 @@ class StaticNotebookValidator:
             fixes.append(f"Literal data SAS → date() em {d_count} ocorrência(s)")
 
         return content, ("; ".join(fixes) if fixes else None)
+
+    def _fix_alter_table_if_not_exists(self, content: str) -> tuple[str, str | None]:
+        """Converte ALTER TABLE ... ADD COLUMN IF NOT EXISTS para try/except.
+
+        Databricks SQL não suporta a cláusula IF NOT EXISTS em ADD COLUMN/COLUMNS.
+        Substitui por bloco try/except Python que absorve o erro quando a coluna
+        já existe, tornando a operação idempotente.
+
+        Padrão detectado (gerado por healing de sessões anteriores):
+            spark.sql("ALTER TABLE t ADD COLUMN IF NOT EXISTS `col` STRING")
+        Substituído por:
+            try:
+                spark.sql("ALTER TABLE t ADD COLUMNS (`col` STRING)")
+            except Exception:
+                pass  # coluna já existe
+        """
+        pattern = re.compile(
+            r'spark\.sql\("ALTER TABLE ([\w.]+) ADD COLUMNS? IF NOT EXISTS `(\w+)` (\w+)"\)',
+            re.IGNORECASE,
+        )
+
+        count = len(pattern.findall(content))
+        if not count:
+            return content, None
+
+        def _replace(m: re.Match) -> str:
+            table, col, dtype = m.group(1), m.group(2), m.group(3)
+            return (
+                f'try:\n'
+                f'    spark.sql("ALTER TABLE {table} ADD COLUMNS (`{col}` {dtype})")\n'
+                f'except Exception:\n'
+                f'    pass  # coluna já existe'
+            )
+
+        content = pattern.sub(_replace, content)
+        return content, f"ALTER TABLE IF NOT EXISTS → try/except em {count} ocorrência(s)"
 
     def _deduplicate_imports(self, content: str) -> tuple[str, str | None]:
         """Remove linhas de import duplicadas mantendo a primeira ocorrência."""

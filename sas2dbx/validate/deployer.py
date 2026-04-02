@@ -89,13 +89,19 @@ class DatabricksDeployer:
         """Faz upload do arquivo .py como notebook Python no workspace."""
         import base64
 
+        from databricks.sdk.service.workspace import ImportFormat, Language
+
+        # Garante que o diretório pai existe antes do upload
+        parent = workspace_path.rsplit("/", 1)[0]
+        self._client.workspace.mkdirs(path=parent)
+
         source = local_path.read_bytes()
         encoded = base64.b64encode(source).decode("ascii")
 
         self._client.workspace.import_(
             path=workspace_path,
-            format="SOURCE",
-            language="PYTHON",
+            format=ImportFormat.SOURCE,
+            language=Language.PYTHON,
             content=encoded,
             overwrite=True,
         )
@@ -110,45 +116,42 @@ class DatabricksDeployer:
         Returns:
             job_id (int).
         """
-        # Procura job existente com o mesmo nome
         existing = None
         for job in self._client.jobs.list(name=job_name):
             existing = job
             break
 
-        job_settings = self._build_job_settings(workspace_path, job_name)
+        settings = self._build_job_settings(workspace_path, job_name)
 
         if existing is not None:
-            self._client.jobs.reset(job_id=existing.job_id, new_settings=job_settings)
+            self._client.jobs.reset(job_id=existing.job_id, new_settings=settings)
             return existing.job_id
 
-        response = self._client.jobs.create(**job_settings)
+        response = self._client.jobs.create(
+            name=settings.name,
+            tasks=settings.tasks,
+        )
         return response.job_id
 
-    def _build_job_settings(self, workspace_path: str, job_name: str) -> dict:
-        """Monta o dict de configuração do job usando config para cluster.
+    def _build_job_settings(self, workspace_path: str, job_name: str):
+        """Monta JobSettings tipado para o SDK Databricks.
 
-        Os parâmetros node_type_id e spark_version vêm de DatabricksConfig
-        (D1 — evita hardcode).
+        Sem especificação de cluster: workspaces serverless usam serverless
+        automaticamente; workspaces clássicos requerem existing_cluster_id
+        ou new_cluster configurados externamente.
         """
-        return {
-            "name": job_name,
-            "tasks": [
-                {
-                    "task_key": "run_notebook",
-                    "notebook_task": {
-                        "notebook_path": workspace_path,
-                        "source": "WORKSPACE",
-                    },
-                    "new_cluster": {
-                        "spark_version": self._config.spark_version,
-                        "node_type_id": self._config.node_type_id,
-                        "num_workers": 1,
-                        "spark_conf": {
-                            "spark.databricks.delta.preview.enabled": "true",
-                        },
-                    },
-                }
-            ],
-            "format": "MULTI_TASK",
-        }
+        from databricks.sdk.service.jobs import JobSettings, NotebookTask, Source, Task
+
+        task = Task(
+            task_key="run_notebook",
+            notebook_task=NotebookTask(
+                notebook_path=workspace_path,
+                source=Source.WORKSPACE,
+            ),
+        )
+
+        # Cluster clássico: usa existing_cluster_id se fornecido na config
+        if self._config.cluster_id:
+            task.existing_cluster_id = self._config.cluster_id
+
+        return JobSettings(name=job_name, tasks=[task])

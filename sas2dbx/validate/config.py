@@ -28,6 +28,7 @@ class DatabricksConfig:
     node_type_id: str = "i3.xlarge"
     spark_version: str = "13.3.x-scala2.12"
     warehouse_id: str | None = None
+    cluster_id: str | None = None  # None = serverless (padrão); preencher para cluster clássico
 
     @classmethod
     def from_env(cls) -> "DatabricksConfig":
@@ -63,6 +64,7 @@ class DatabricksConfig:
             node_type_id=os.environ.get("DATABRICKS_NODE_TYPE_ID", "i3.xlarge"),
             spark_version=os.environ.get("DATABRICKS_SPARK_VERSION", "13.3.x-scala2.12"),
             warehouse_id=os.environ.get("DATABRICKS_WAREHOUSE_ID") or None,
+            cluster_id=os.environ.get("DATABRICKS_CLUSTER_ID") or None,
         )
 
     def is_complete(self) -> bool:

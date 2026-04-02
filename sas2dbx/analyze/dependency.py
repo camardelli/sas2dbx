@@ -259,11 +259,16 @@ class DependencyAnalyzer:
         Returns:
             Lista de (job_dependente, job_prerequisito, dataset_name).
         """
-        # Mapa dataset → lista de jobs que o criam
+        # Mapa dataset → lista de jobs que o criam.
+        # Apenas datasets qualificados (lib.tabela) criam arestas persistentes.
+        # Nomes sem qualificador de biblioteca em SAS são WORK-scoped (sessão)
+        # e não criam dependências reais entre jobs.
         producers: dict[str, list[str]] = {}
         for job_name, node in jobs.items():
             for ds in node.outputs:
-                lib = ds.split(".")[0] if "." in ds else ""
+                if "." not in ds:
+                    continue  # sem qualificador → WORK implícito, ignora
+                lib = ds.split(".")[0]
                 if lib in _WORK_LIBRARIES:
                     continue
                 producers.setdefault(ds, []).append(job_name)
@@ -273,7 +278,9 @@ class DependencyAnalyzer:
 
         for job_name, node in jobs.items():
             for ds in node.inputs:
-                lib = ds.split(".")[0] if "." in ds else ""
+                if "." not in ds:
+                    continue  # sem qualificador → WORK implícito, ignora
+                lib = ds.split(".")[0]
                 if lib in _WORK_LIBRARIES:
                     continue
                 if ds in producers:

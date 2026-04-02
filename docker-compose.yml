@@ -5,8 +5,9 @@ services:
       - "8000:8000"
     volumes:
       - sas2dbx_work:/data/sas2dbx_work
+    env_file:
+      - .env
     environment:
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - MAX_UPLOAD_MB=${MAX_UPLOAD_MB:-200}
       - WORK_DIR=/data/sas2dbx_work
     restart: unless-stopped

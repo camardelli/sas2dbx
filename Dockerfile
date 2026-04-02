@@ -12,8 +12,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY pyproject.toml README.md ./
 COPY sas2dbx/ ./sas2dbx/
 
-# Instala o pacote com dependências web
-RUN pip install --no-cache-dir ".[web]"
+# Instala o pacote com dependências web + databricks SDK
+RUN pip install --no-cache-dir ".[web,databricks]"
 
 # Diretório de trabalho para migrações (montado como volume em produção)
 RUN mkdir -p /data/sas2dbx_work

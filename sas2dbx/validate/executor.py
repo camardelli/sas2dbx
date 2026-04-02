@@ -189,10 +189,33 @@ class WorkflowExecutor:
         life_cycle = state.life_cycle_state.value if state.life_cycle_state else "UNKNOWN"
         result = state.result_state.value if state.result_state else None
 
-        # Mapeamento: quando termina (TERMINATED), usa result_state
+        # TERMINATED: job concluiu normalmente (SUCCESS ou FAILED)
         if life_cycle == "TERMINATED":
             final = result or "UNKNOWN"
-            error = state.state_message or None
+            if final != "SUCCESS":
+                error = self._fetch_task_error(run) or state.state_message or None
+            else:
+                error = None
             return final, error
 
+        # INTERNAL_ERROR: estado terminal de falha de infra/tarefa Databricks
+        if life_cycle == "INTERNAL_ERROR":
+            error = self._fetch_task_error(run) or state.state_message or "Internal error no Databricks"
+            return "FAILED", error
+
         return life_cycle, None
+
+    def _fetch_task_error(self, run) -> str | None:
+        """Tenta buscar a mensagem de erro detalhada da task que falhou."""
+        try:
+            for task in run.tasks or []:
+                if task.run_id and task.state and task.state.result_state:
+                    result = task.state.result_state.value if task.state.result_state else None
+                    if result and result != "SUCCESS":
+                        output = self._client.jobs.get_run_output(run_id=task.run_id)
+                        if output.error:
+                            # Retorna apenas a primeira linha (sem o traceback completo)
+                            return output.error.split("\n")[0]
+        except Exception:  # noqa: BLE001
+            pass
+        return None

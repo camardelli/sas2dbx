@@ -51,16 +51,17 @@ class AnthropicProvider(LLMProvider):
                 "Pacote 'anthropic' não instalado. Execute: pip install anthropic"
             ) from exc
 
-        client = anthropic.AsyncAnthropic(api_key=self._api_key)
-
         t0 = time.monotonic()
         try:
-            message = await client.messages.create(
-                model=self._model,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                messages=[{"role": "user", "content": prompt}],
-            )
+            # async with garante que o httpx client fecha antes do event loop encerrar
+            # timeout=60s evita hang indefinido em falhas de rede
+            async with anthropic.AsyncAnthropic(api_key=self._api_key, timeout=60.0) as client:
+                message = await client.messages.create(
+                    model=self._model,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    messages=[{"role": "user", "content": prompt}],
+                )
         except anthropic.RateLimitError as exc:
             raise LLMRateLimitError(str(exc), status_code=429) from exc
         except anthropic.APIStatusError as exc:

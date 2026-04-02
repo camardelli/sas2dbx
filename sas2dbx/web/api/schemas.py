@@ -104,11 +104,16 @@ class TableValidationResult(BaseModel):
 
 
 class ValidationSummary(BaseModel):
-    total_tables: int
-    tables_ok: int
-    tables_error: int
-    total_rows_collected: int
+    total_notebooks: int = 0
+    notebooks_ok: int = 0
+    notebooks_failed: int = 0
+    notebooks_skipped: int = 0
+    total_rows_collected: int = 0
     overall_status: str
+    # Legacy fields (single-notebook)
+    total_tables: int = 0
+    tables_ok: int = 0
+    tables_error: int = 0
 
 
 class ValidationResponse(BaseModel):
@@ -117,7 +122,9 @@ class ValidationResponse(BaseModel):
     generated_at: str | None = None
     pipeline: dict | None = None
     summary: ValidationSummary | None = None
+    notebook_results: list[dict] = []
     tables: list[TableValidationResult] = []
+    error: str | None = None  # mensagem de erro quando validation_status == "failed"
 
 
 # ---------------------------------------------------------------------------

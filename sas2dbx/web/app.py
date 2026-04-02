@@ -18,6 +18,12 @@ import logging
 import os
 from pathlib import Path
 
+# Garante que logs da aplicação apareçam no stdout (uvicorn não configura root logger)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s:%(name)s:%(message)s",
+)
+
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 

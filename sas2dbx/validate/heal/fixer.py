@@ -524,11 +524,17 @@ class NotebookFixer:
         if missing_column not in all_cols:
             all_cols.insert(0, missing_column)
 
-        # Monta ALTER TABLE para cada tabela candidata, adicionando todas as colunas
+        # Monta ALTER TABLE para cada tabela candidata, adicionando todas as colunas.
+        # Databricks não suporta "ADD COLUMN IF NOT EXISTS" — usa try/except por coluna.
         alter_stmts = ""
         for t in tables:
             for col in all_cols:
-                alter_stmts += f'spark.sql("ALTER TABLE {t} ADD COLUMN IF NOT EXISTS `{col}` STRING")\n'
+                alter_stmts += (
+                    f'try:\n'
+                    f'    spark.sql("ALTER TABLE {t} ADD COLUMNS (`{col}` STRING)")\n'
+                    f'except Exception:\n'
+                    f'    pass  # coluna já existe\n'
+                )
         alter_block = (
             f"# [AUTO-FIX] Adiciona {len(all_cols)} coluna(s) faltante(s) à placeholder\n"
             f"{alter_stmts}\n"
