@@ -28,15 +28,44 @@ ERROR_PATTERNS: dict[str, ErrorPattern] = {
         "deterministic_fix": "create_placeholder_table",
         "severity": "HIGH",
     },
+    "column_not_found_with_suggestion": {
+        "pattern": re.compile(
+            r"UNRESOLVED_COLUMN\.WITH_SUGGESTION"
+            r"|cannot be resolved\. Did you mean one of the following",
+            re.IGNORECASE,
+        ),
+        "category": "unresolved_column_suggestion",
+        "deterministic_fix": "fix_unresolved_column",
+        "severity": "HIGH",
+    },
     "column_not_found": {
         "pattern": re.compile(
             r"cannot resolve[`'\s]+([\w.]+)[`'\s]+given input columns"
-            r"|UNRESOLVED_COLUMN"
+            r"|UNRESOLVED_COLUMN(?!\.WITH_SUGGESTION)"
             r"|AnalysisException[:\s]+.*cannot resolve",
             re.IGNORECASE,
         ),
         "category": "missing_column",
         "deterministic_fix": None,
+        "severity": "HIGH",
+    },
+    "cast_invalid_input": {
+        "pattern": re.compile(
+            r"CAST_INVALID_INPUT"
+            r"|cannot be cast to .BIGINT. because it is malformed",
+            re.IGNORECASE,
+        ),
+        "category": "cast_type_mismatch",
+        "deterministic_fix": "fix_when_otherwise_type",
+        "severity": "HIGH",
+    },
+    "stack_type_mismatch": {
+        "pattern": re.compile(
+            r"DATATYPE_MISMATCH\.STACK_COLUMN_DIFF_TYPES",
+            re.IGNORECASE,
+        ),
+        "category": "stack_type_mismatch",
+        "deterministic_fix": "fix_stack_type_mismatch",
         "severity": "HIGH",
     },
     "type_mismatch": {
@@ -70,7 +99,7 @@ ERROR_PATTERNS: dict[str, ErrorPattern] = {
             re.IGNORECASE,
         ),
         "category": "missing_function",
-        "deterministic_fix": None,
+        "deterministic_fix": "fix_function_not_found",
         "severity": "HIGH",
     },
     "import_error": {
@@ -147,6 +176,39 @@ ERROR_PATTERNS: dict[str, ErrorPattern] = {
         "category": "syntax",
         "deterministic_fix": None,
         "severity": "CRITICAL",
+    },
+    "config_not_available": {
+        "pattern": re.compile(
+            r"CONFIG_NOT_AVAILABLE"
+            r"|Configuration .* is not available"
+            r"|spark\.conf\.get.*not found",
+            re.IGNORECASE,
+        ),
+        "category": "spark_conf_missing",
+        "deterministic_fix": "fix_spark_conf_get",
+        "severity": "HIGH",
+    },
+    "catalog_not_found": {
+        "pattern": re.compile(
+            r"NO_SUCH_CATALOG_EXCEPTION"
+            r"|Catalog '[\w]+' was not found"
+            r"|CATALOG_NOT_FOUND",
+            re.IGNORECASE,
+        ),
+        "category": "wrong_catalog",
+        "deterministic_fix": "fix_wrong_catalog",
+        "severity": "CRITICAL",
+    },
+    "schema_mismatch": {
+        "pattern": re.compile(
+            r"_LEGACY_ERROR_TEMP_DELTA_0007"
+            r"|schema mismatch detected when writing"
+            r"|A schema mismatch detected",
+            re.IGNORECASE,
+        ),
+        "category": "schema_mismatch",
+        "deterministic_fix": "fix_overwrite_schema",
+        "severity": "HIGH",
     },
 }
 

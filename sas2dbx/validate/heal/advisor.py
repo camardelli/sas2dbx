@@ -77,6 +77,33 @@ class HealingAdvisor:
         """
         return asyncio.run(self.suggest_fix(notebook_path, execution_result))
 
+    @staticmethod
+    def _build_patch_diff(notebook_path: Path) -> str:
+        """Gera diff resumido entre .py.bak e o notebook atual.
+
+        Retorna string formatada para injeção no prompt LLM, ou "" se .py.bak
+        não existir (primeira iteração sem backup).
+        """
+        bak_path = notebook_path.with_suffix(".py.bak")
+        if not bak_path.exists():
+            return ""
+        try:
+            import difflib
+            original = bak_path.read_text(encoding="utf-8").splitlines()
+            current = notebook_path.read_text(encoding="utf-8").splitlines()
+            diff_lines = list(
+                difflib.unified_diff(original, current, lineterm="", n=2)
+            )
+            if not diff_lines:
+                return ""
+            # Limita a 60 linhas para não explodir o contexto
+            truncated = diff_lines[:60]
+            if len(diff_lines) > 60:
+                truncated.append(f"... ({len(diff_lines) - 60} linhas omitidas)")
+            return "\n".join(truncated)
+        except Exception:  # noqa: BLE001
+            return ""
+
     async def suggest_fix(
         self,
         notebook_path: Path,
@@ -120,7 +147,8 @@ class HealingAdvisor:
 
         # Fallback: LLM
         if self._llm is not None:
-            llm_fix = self._llm_suggest_fix(diagnostic)
+            patch_diff = self._build_patch_diff(notebook_path)
+            llm_fix = self._llm_suggest_fix(diagnostic, patch_diff=patch_diff)
             llm_fix.diagnostic = diagnostic
             return llm_fix
 
@@ -151,7 +179,10 @@ class HealingAdvisor:
         if not diagnostic.deterministic_fix:
             return None
 
-        fixer = NotebookFixer()
+        fixer = NotebookFixer(
+            correct_catalog=self._config.catalog,
+            correct_schema=self._config.schema,
+        )
         patch_result = fixer.apply_fix(notebook_path, diagnostic)
 
         if not patch_result.patched:
@@ -178,7 +209,7 @@ class HealingAdvisor:
             retest_result=retest_result,
         )
 
-    def _llm_suggest_fix(self, diagnostic: ErrorDiagnostic) -> FixSuggestion:
+    def _llm_suggest_fix(self, diagnostic: ErrorDiagnostic, patch_diff: str = "") -> FixSuggestion:
         """Solicita sugestão de correção ao LLM.
 
         Não propaga LLMProviderError — loga warning e retorna strategy="none".
@@ -190,12 +221,18 @@ class HealingAdvisor:
             FixSuggestion com strategy="llm" ou "none".
         """
         try:
+            diff_section = (
+                f"\nPATCH JÁ APLICADO (diff do backup → versão atual):\n```diff\n{patch_diff}\n```\n"
+                if patch_diff
+                else ""
+            )
             prompt = (
                 "You are a Databricks/PySpark expert helping fix notebook errors.\n"
                 f"Error category: {diagnostic.category or 'unknown'}\n"
                 f"Error message: {diagnostic.error_raw[:1000]}\n"
                 f"LLM analysis: {diagnostic.llm_analysis or 'N/A'}\n"
-                f"Entities: {diagnostic.entities}\n\n"
+                f"Entities: {diagnostic.entities}\n"
+                f"{diff_section}\n"
                 "Provide a specific, actionable fix as a code snippet or step-by-step "
                 "instructions. Keep it under 200 words."
             )

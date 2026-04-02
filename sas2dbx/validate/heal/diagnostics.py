@@ -142,14 +142,23 @@ class DiagnosticsEngine:
         """
         entities: dict[str, str] = {}
 
-        # Tabela: padrão "Table or view not found: <name>"
-        table_match = re.search(
-            r"Table or view not found[:\s]+[`'\"]?([\w.]+)[`'\"]?",
+        # Tabela: padrão Databricks "[TABLE_OR_VIEW_NOT_FOUND] The table or view `cat`.`sch`.`tbl`"
+        dbx_table_match = re.search(
+            r"table or view\s+`([^`]+)`\.`([^`]+)`\.`([^`]+)`",
             error_message,
             re.IGNORECASE,
         )
-        if table_match:
-            entities["table_name"] = table_match.group(1)
+        if dbx_table_match:
+            entities["table_name"] = f"{dbx_table_match.group(1)}.{dbx_table_match.group(2)}.{dbx_table_match.group(3)}"
+        else:
+            # Padrão genérico "Table or view not found: <name>"
+            table_match = re.search(
+                r"Table or view not found[:\s]+[`'\"]?([\w.]+)[`'\"]?",
+                error_message,
+                re.IGNORECASE,
+            )
+            if table_match:
+                entities["table_name"] = table_match.group(1)
 
         # Coluna: padrão "cannot resolve `<col>` given input columns"
         col_match = re.search(
@@ -176,6 +185,35 @@ class DiagnosticsEngine:
         )
         if mod_match:
             entities["module_name"] = mod_match.group(1)
+
+        # Catálogo errado: padrão "Catalog 'name' was not found"
+        cat_match = re.search(
+            r"Catalog '([\w]+)' was not found",
+            error_message,
+            re.IGNORECASE,
+        )
+        if cat_match:
+            entities["wrong_catalog"] = cat_match.group(1)
+
+        # Coluna não resolvida com sugestão: "with name `coluna_ordem` cannot be resolved.
+        # Did you mean one of the following? [`ano_mes`, `receita_pre`]"
+        unresolved_col_match = re.search(
+            r"with name\s+[`'\"]?([\w]+)[`'\"]?\s+cannot be resolved",
+            error_message,
+            re.IGNORECASE,
+        )
+        if unresolved_col_match:
+            entities["unresolved_column"] = unresolved_col_match.group(1)
+
+        suggestion_match = re.search(
+            r"Did you mean one of the following\?\s*\[`?([^`\]]+)`?",
+            error_message,
+            re.IGNORECASE,
+        )
+        if suggestion_match:
+            # Pega primeira sugestão (mais provável)
+            first_suggestion = suggestion_match.group(1).split("`")[0].strip().rstrip(",")
+            entities["suggested_column"] = first_suggestion
 
         # Infere catalog/schema do nome da tabela
         if "table_name" in entities:

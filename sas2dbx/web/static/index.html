@@ -220,6 +220,19 @@
     .btn-action:hover { background: var(--border); border-color: var(--accent); }
     .btn-action.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
     .btn-action.primary:hover { background: var(--accent-hover); }
+    .btn-action.danger { border-color: rgba(239,68,68,.4); color: var(--red); }
+    .btn-action.danger:hover { background: rgba(239,68,68,.12); border-color: var(--red); }
+    .btn-delete-row {
+      background: none;
+      border: none;
+      color: var(--muted);
+      cursor: pointer;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: .8rem;
+      transition: color .15s, background .15s;
+    }
+    .btn-delete-row:hover { color: var(--red); background: rgba(239,68,68,.1); }
 
     .error-box {
       background: rgba(239,68,68,.1);
@@ -227,6 +240,38 @@
       border-radius: 6px;
       padding: 12px 16px;
       color: var(--red);
+      font-size: .88rem;
+      margin-top: 12px;
+    }
+
+    /* ---- Pipeline steps (transpilação + validação) ---- */
+    .pipeline-steps { display: flex; flex-direction: column; gap: 10px; margin: 16px 0; }
+    .pipeline-step {
+      display: flex; align-items: flex-start; gap: 12px;
+      padding: 10px 14px;
+      background: var(--surface2);
+      border-radius: 6px;
+      border-left: 3px solid var(--border);
+      font-size: .88rem;
+    }
+    .pipeline-step.step-pending   { border-left-color: var(--border); opacity: .55; }
+    .pipeline-step.step-running   { border-left-color: var(--blue); }
+    .pipeline-step.step-done      { border-left-color: var(--green); }
+    .pipeline-step.step-failed    { border-left-color: var(--red); }
+    .pipeline-step.step-success   { border-left-color: var(--green); }
+    .pipeline-step.step-healing   { border-left-color: var(--yellow); }
+    .pipeline-step.step-healed    { border-left-color: var(--green); }
+    .step-icon { font-size: 1rem; min-width: 20px; text-align: center; }
+    .step-body { flex: 1; }
+    .step-title { font-weight: 600; margin-bottom: 2px; }
+    .step-detail { color: var(--muted); font-size: .8rem; font-family: "SF Mono","Fira Code",monospace; }
+    .step-sub { margin-top: 8px; padding: 8px 12px; background: var(--surface); border-radius: 5px; font-size: .8rem; }
+    .success-box {
+      background: rgba(34,197,94,.08);
+      border: 1px solid rgba(34,197,94,.3);
+      border-radius: 6px;
+      padding: 12px 16px;
+      color: var(--green);
       font-size: .88rem;
       margin-top: 12px;
     }
@@ -330,6 +375,12 @@
     </div>
   </div>
 
+  <!-- Card: Pipeline de Transpilação (visível durante processing e após done) -->
+  <div class="card" id="detail-transpile-card" style="display:none">
+    <h2>Pipeline de Transpilação</h2>
+    <div class="pipeline-steps" id="transpile-steps"></div>
+  </div>
+
   <div class="card" id="detail-jobs-card">
     <h2 id="jobs-title">Jobs</h2>
     <div id="jobs-list"></div>
@@ -340,6 +391,20 @@
     <div class="action-bar">
       <a id="btn-explorer" href="#" target="_blank" class="btn-action primary">Abrir Explorer</a>
       <a id="btn-download" href="#" class="btn-action">Baixar .zip</a>
+      <button class="btn-action" id="btn-validate" onclick="startValidation()">Deploy &amp; Executar no Databricks</button>
+    </div>
+  </div>
+
+  <!-- Card: Validação & Healing -->
+  <div class="card" id="detail-validation-card" style="display:none">
+    <h2>Validação Databricks</h2>
+    <div class="pipeline-steps" id="pipeline-steps"></div>
+    <div id="validation-error"></div>
+  </div>
+
+  <div class="card" id="detail-delete-card" style="display:none">
+    <div class="action-bar">
+      <button class="btn-action danger" id="btn-delete-migration">Remover esta migração e fazer novo upload</button>
     </div>
   </div>
 
@@ -425,7 +490,7 @@ async function loadHistory() {
     container.innerHTML = `
       <table>
         <thead><tr>
-          <th>ID</th><th>Status</th><th>Criado em</th>
+          <th>ID</th><th>Status</th><th>Criado em</th><th></th>
         </tr></thead>
         <tbody>
           ${list.map(m => `
@@ -433,6 +498,8 @@ async function loadHistory() {
               <td class="mono">${encodeHTML(m.migration_id.substring(0, 8))}…</td>
               <td>${badge(m.status)}</td>
               <td>${fmtDate(m.created_at)}</td>
+              <td><button class="btn-delete-row" title="Remover migração"
+                onclick="event.stopPropagation(); deleteMigration('${encodeHTML(m.migration_id)}')">✕</button></td>
             </tr>
           `).join("")}
         </tbody>
@@ -499,6 +566,9 @@ function showDetail(id) {
   document.getElementById("screen-detail").classList.add("active");
   document.getElementById("detail-id").textContent = id;
   document.getElementById("detail-actions").style.display = "none";
+  document.getElementById("detail-delete-card").style.display = "none";
+  document.getElementById("detail-transpile-card").style.display = "none";
+  document.getElementById("transpile-steps").innerHTML = "";
   document.getElementById("detail-error").innerHTML = "";
   document.getElementById("jobs-list").innerHTML = "";
   document.getElementById("detail-status").innerHTML = badge("pending");
@@ -529,6 +599,7 @@ async function fetchStatus(id) {
     if (data.status === "done" || data.status === "failed") {
       stopPolling();
       if (data.status === "done") fetchResultLinks(id);
+      document.getElementById("detail-delete-card").style.display = "block";
     }
   } catch (e) {
     stopPolling();
@@ -555,9 +626,39 @@ function renderStatus(data) {
   const failed = p.failed || 0;
   const pct = total > 0 ? Math.round(((done + failed) / total) * 100) : (data.status === "done" ? 100 : 0);
   document.getElementById("progress-fill").style.width = pct + "%";
-  document.getElementById("progress-label").textContent =
-    total > 0 ? `${done + failed} / ${total} jobs · ${done} concluídos · ${failed} com falha` :
-    (data.status === "processing" ? "Processando…" : data.status === "done" ? "Concluído" : "Aguardando…");
+  let progressLabel;
+  if (total > 0) {
+    const jobsLabel = `${done + failed} / ${total} jobs · ${done} concluídos · ${failed} com falha`;
+    if (pct === 100 && data.status === "processing") {
+      progressLabel = jobsLabel + " · Gerando documentação e arquitetura…";
+    } else {
+      progressLabel = jobsLabel;
+    }
+  } else {
+    progressLabel = data.status === "processing" ? "Processando…" : data.status === "done" ? "Concluído" : "Aguardando…";
+  }
+  document.getElementById("progress-label").textContent = progressLabel;
+
+  // Pipeline de transpilação
+  const transpileCard = document.getElementById("detail-transpile-card");
+  const transpileSteps = document.getElementById("transpile-steps");
+  if (data.pipeline_steps && data.pipeline_steps.length) {
+    transpileCard.style.display = "block";
+    const stepIcons    = { pending: "○", running: "⟳", done: "✓", failed: "✗" };
+    const stepColors   = { pending: "var(--muted)", running: "var(--blue)", done: "var(--green)", failed: "var(--red)" };
+    transpileSteps.innerHTML = data.pipeline_steps.map(s => {
+      const icon  = stepIcons[s.status]  || "○";
+      const color = stepColors[s.status] || "var(--muted)";
+      const spin  = s.status === "running" ? " polling-dot" : "";
+      return `<div class="pipeline-step step-${s.status}">
+        <span class="step-icon${spin}" style="color:${color}">${icon}</span>
+        <div class="step-body">
+          <div class="step-title">${encodeHTML(s.label)}</div>
+          ${s.detail ? `<div class="step-detail">${encodeHTML(s.detail)}</div>` : ""}
+        </div>
+      </div>`;
+    }).join("");
+  }
 
   // Jobs list
   const list = document.getElementById("jobs-list");
@@ -567,7 +668,7 @@ function renderStatus(data) {
       <div class="job-row">
         <span class="job-name">${encodeHTML(j.job_id)}</span>
         ${badge(j.status)}
-        <span class="job-conf">${j.confidence != null ? (j.confidence * 100).toFixed(0) + "%" : ""}</span>
+        <span class="job-conf">${j.confidence != null && j.confidence > 0 ? (j.confidence * 100).toFixed(0) + "%" : "—"}</span>
       </div>`).join("");
   } else {
     list.innerHTML = `<div style="color:var(--muted);font-size:.88rem;padding:8px 0">${isRunning ? "Aguardando início do processamento…" : "Nenhum job encontrado."}</div>`;
@@ -590,6 +691,259 @@ async function fetchResultLinks(id) {
   } catch (_) {
     // resultados não críticos — omite sem erro
   }
+}
+
+// ============================================================
+// Deletar migração
+// ============================================================
+async function deleteMigration(id) {
+  if (!confirm(`Remover migração ${id.substring(0, 8)}…?\nTodos os arquivos gerados serão apagados.`)) return;
+  try {
+    await apiFetch(`/migrations/${id}`, { method: "DELETE" });
+    if (location.hash === `#/migrations/${id}`) {
+      location.hash = "#/";
+    } else {
+      loadHistory();
+    }
+  } catch (e) {
+    alert("Erro ao remover migração: " + e.message);
+  }
+}
+
+document.getElementById("btn-delete-migration").addEventListener("click", () => {
+  const id = document.getElementById("detail-id").textContent;
+  deleteMigration(id);
+});
+
+// ============================================================
+// Validação & Healing — fluxo completo automatizado
+// ============================================================
+let _validationTimer = null;
+let _healingTimers = {};
+
+function currentMigrationId() {
+  return document.getElementById("detail-id").textContent.trim();
+}
+
+async function startValidation() {
+  const id = currentMigrationId();
+  document.getElementById("btn-validate").disabled = true;
+  document.getElementById("btn-validate").textContent = "Iniciando…";
+  document.getElementById("detail-validation-card").style.display = "block";
+  document.getElementById("validation-error").innerHTML = "";
+  renderPipelineStep("deploy",    "pending", "Deploy",    "Preparando notebook…");
+  renderPipelineStep("execution", "pending", "Execução",  "Aguardando deploy…");
+  renderPipelineStep("result",    "pending", "Resultado", "—");
+
+  try {
+    await apiFetch(`/migrations/${id}/validate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tables: [], deploy_only: false, collect_only: false }),
+    });
+    renderPipelineStep("deploy", "running", "Deploy", "Fazendo deploy no workspace…");
+    renderPipelineStep("execution", "running", "Execução", "Aguardando deploy…");
+    _validationTimer = setInterval(() => pollValidation(id), 5000);
+  } catch (e) {
+    document.getElementById("validation-error").innerHTML =
+      `<div class="error-box">Erro ao iniciar validação: ${encodeHTML(e.message)}</div>`;
+    document.getElementById("btn-validate").disabled = false;
+    document.getElementById("btn-validate").textContent = "Deploy & Executar no Databricks";
+  }
+}
+
+async function pollValidation(id) {
+  try {
+    const r = await apiFetch(`/migrations/${id}/validation`);
+    const data = await r.json();
+
+    if (data.validation_status === "running" || data.validation_status === "pending") {
+      const nbs = data.notebook_results || [];
+      if (nbs.length === 0) {
+        renderPipelineStep("deploy", "running", "Deploy", "Iniciando deploy…");
+        renderPipelineStep("execution", "pending", "Execução", "Aguardando deploy…");
+      } else {
+        const last = nbs[nbs.length - 1];
+        const prog = `[${last.index}/${last.total}] ${last.name}`;
+        if (last.status) {
+          const icon = last.status === "SUCCESS" ? "✓" : "✗";
+          renderPipelineStep("deploy", "running", "Deploy", `${prog} — executado ${icon}`);
+          renderPipelineStep("execution", "running", "Execução", `run_id=${last.run_id || "…"}`);
+        } else if (last.job_id) {
+          renderPipelineStep("deploy", "running", "Deploy", `${prog} — deploy ok, executando…`);
+          renderPipelineStep("execution", "running", "Execução", "Executando…");
+        } else {
+          renderPipelineStep("deploy", "running", "Deploy", `${prog} — fazendo deploy…`);
+          renderPipelineStep("execution", "pending", "Execução", "Aguardando…");
+        }
+      }
+      return;
+    }
+
+    // Terminal: done ou failed
+    clearInterval(_validationTimer);
+    _validationTimer = null;
+
+    const nbs = data.notebook_results || [];
+    const summary = data.summary || {};
+
+    if (data.validation_status === "failed" && nbs.length === 0) {
+      const errMsg = data.error || "Erro desconhecido";
+      document.getElementById("validation-error").innerHTML =
+        `<div class="error-box"><strong>Falha:</strong> ${encodeHTML(errMsg)}</div>`;
+      renderPipelineStep("deploy", "failed", "Deploy", encodeHTML(errMsg));
+      renderPipelineStep("execution", "pending", "Execução", "Não iniciada");
+      renderPipelineStep("result",    "pending", "Resultado", "—");
+      const btn = document.getElementById("btn-validate");
+      btn.disabled = false;
+      btn.textContent = "Tentar novamente";
+      btn.onclick = startValidation;
+      return;
+    }
+
+    // Renderiza tabela de notebooks
+    const okCount = nbs.filter(n => n.status === "SUCCESS").length;
+    const failCount = nbs.filter(n => n.status && n.status !== "SUCCESS").length;
+    const skipped = (summary.total_notebooks || nbs.length) - nbs.length;
+
+    let nbTable = `<table style="width:100%;font-size:12px;border-collapse:collapse;margin-top:6px">
+      <tr style="color:var(--muted)"><th align="left">Notebook</th><th>run_id</th><th>Duração</th><th>Status</th></tr>`;
+    for (const nb of nbs) {
+      const icon = nb.status === "SUCCESS" ? "✓" : (nb.status ? "✗" : "—");
+      const color = nb.status === "SUCCESS" ? "var(--green)" : (nb.status ? "var(--red)" : "var(--muted)");
+      const dur = nb.duration_ms ? `${(nb.duration_ms/1000).toFixed(1)}s` : "—";
+      const err = nb.error ? `<br><span style="color:var(--red);font-size:11px">${encodeHTML(nb.error.substring(0,80))}</span>` : "";
+      nbTable += `<tr><td>${encodeHTML(nb.name)}${err}</td><td style="color:var(--muted)">${nb.run_id||"—"}</td><td>${dur}</td><td style="color:${color};font-weight:bold">${icon}</td></tr>`;
+    }
+    if (skipped > 0) {
+      nbTable += `<tr><td colspan="4" style="color:var(--muted);font-style:italic">${skipped} notebook(s) não executado(s) por dependência</td></tr>`;
+    }
+    nbTable += `</table>`;
+
+    const deployState = failCount === 0 ? "success" : (okCount > 0 ? "failed" : "failed");
+    renderPipelineStep("deploy", "success", "Deploy",
+      `${nbs.length} notebook(s) deployado(s)`, nbTable);
+
+    if (failCount === 0 && okCount === nbs.length) {
+      renderPipelineStep("execution", "success", "Execução",
+        `${okCount}/${summary.total_notebooks || okCount} notebooks OK`);
+      renderPipelineStep("result", "success", "Resultado",
+        `Concluído com sucesso${summary.total_rows_collected ? ` · ${summary.total_rows_collected} linhas coletadas` : ""}`);
+      document.getElementById("btn-validate").textContent = "✓ Concluído";
+    } else {
+      const failedNb = nbs.find(n => n.status && n.status !== "SUCCESS");
+      renderPipelineStep("execution", "failed", "Execução",
+        `${okCount} ok · ${failCount} falha(s)`);
+      renderPipelineStep("result", "healing", "Auto-Healing", "Iniciando correção automática…");
+
+      if (failedNb && failedNb.run_id) {
+        await triggerAutoHeal(id, failedNb.name, {
+          run_id: failedNb.run_id,
+          status: failedNb.status,
+          duration_ms: failedNb.duration_ms,
+          error: failedNb.error,
+        });
+      } else {
+        renderPipelineStep("result", "failed", "Auto-Healing", "Não foi possível identificar o notebook para cura");
+        document.getElementById("btn-validate").disabled = false;
+        document.getElementById("btn-validate").textContent = "Tentar novamente";
+      }
+    }
+  } catch (e) {
+    clearInterval(_validationTimer);
+    _validationTimer = null;
+    document.getElementById("validation-error").innerHTML =
+      `<div class="error-box">Erro ao consultar validação: ${encodeHTML(e.message)}</div>`;
+  }
+}
+
+async function triggerAutoHeal(id, notebookName, execResult) {
+  try {
+    const r = await apiFetch(`/migrations/${id}/heal`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        notebook_name: notebookName,
+        execution_result: {
+          run_id: execResult.run_id,
+          status: "FAILED",
+          duration_ms: execResult.duration_ms || 0,
+          error: execResult.error || "FAILED",
+        },
+        max_iterations: 2,
+      }),
+    });
+    const data = await r.json();
+    renderPipelineStep("result", "healing", "Auto-Healing",
+      `healing_id=${data.healing_id.substring(0,8)}… · Analisando e corrigindo…`);
+    _healingTimers[data.healing_id] = setInterval(() => pollHealing(id, data.healing_id), 5000);
+  } catch (e) {
+    renderPipelineStep("result", "failed", "Auto-Healing",
+      `Falha ao iniciar healing: ${encodeHTML(e.message)}`);
+    document.getElementById("btn-validate").disabled = false;
+    document.getElementById("btn-validate").textContent = "Tentar novamente";
+  }
+}
+
+async function pollHealing(id, healingId) {
+  try {
+    const r = await apiFetch(`/migrations/${id}/heal/${healingId}`);
+    const data = await r.json();
+
+    if (data.status === "running") {
+      renderPipelineStep("result", "healing", "Auto-Healing",
+        `Iteração em andamento · estratégia: ${encodeHTML(data.strategy || "analisando…")}`);
+      return;
+    }
+
+    clearInterval(_healingTimers[healingId]);
+    delete _healingTimers[healingId];
+
+    if (data.healed) {
+      renderPipelineStep("result", "healed", "Auto-Healing",
+        `Corrigido em ${data.iterations} iteração(ões) · estratégia: ${encodeHTML(data.strategy)}`,
+        `<div class="step-sub" style="color:var(--green)">${encodeHTML(data.description)}</div>`);
+      document.getElementById("btn-validate").textContent = "✓ Corrigido";
+      document.getElementById("btn-validate").disabled = false;
+    } else {
+      const err = data.error || data.description || "Não foi possível corrigir automaticamente";
+      renderPipelineStep("result", "failed", "Auto-Healing",
+        `Não corrigido após ${data.iterations} iteração(ões)`,
+        `<div class="step-sub" style="color:var(--red)">${encodeHTML(err)}</div>`);
+      document.getElementById("btn-validate").textContent = "Tentar novamente";
+      document.getElementById("btn-validate").disabled = false;
+    }
+  } catch (e) {
+    clearInterval(_healingTimers[healingId]);
+    delete _healingTimers[healingId];
+    renderPipelineStep("result", "failed", "Auto-Healing", encodeHTML(e.message));
+    document.getElementById("btn-validate").disabled = false;
+    document.getElementById("btn-validate").textContent = "Tentar novamente";
+  }
+}
+
+function renderPipelineStep(stepId, state, title, detail, extraHtml = "") {
+  const icons = { pending:"○", running:"●", success:"✓", failed:"✗", healing:"⚡", healed:"✓" };
+  const colors = {
+    pending: "var(--muted)", running: "var(--blue)", success: "var(--green)",
+    failed: "var(--red)", healing: "var(--yellow)", healed: "var(--green)"
+  };
+  const container = document.getElementById("pipeline-steps");
+  let el = document.getElementById(`step-${stepId}`);
+  if (!el) {
+    el = document.createElement("div");
+    el.id = `step-${stepId}`;
+    container.appendChild(el);
+  }
+  el.className = `pipeline-step step-${state}`;
+  el.innerHTML = `
+    <span class="step-icon" style="color:${colors[state]}">${icons[state] || "○"}</span>
+    <div class="step-body">
+      <div class="step-title">${encodeHTML(title)}</div>
+      <div class="step-detail">${detail}</div>
+      ${extraHtml}
+    </div>`;
+  if (state === "running" || state === "healing") el.querySelector(".step-icon").classList.add("polling-dot");
 }
 </script>
 </body>

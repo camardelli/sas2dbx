@@ -59,6 +59,51 @@ _MACRO_CALL_SAS_KEYWORDS = frozenset({
 # Detecta início de invocação de macro: %name( ou %name;
 _MACRO_INVOCATION_LINE = re.compile(r"^\s*%(\w+)", re.IGNORECASE)
 
+# Detecta %INCLUDE para gerar aviso
+_INCLUDE_LINE = re.compile(r"^\s*%INCLUDE\b", re.IGNORECASE)
+
+
+# Bytes característicos de latin-1/cp1252 em textos brasileiros (ç, ã, é, ô, etc.)
+# Presença desses bytes em arquivo que "passou" como UTF-8 indica risco de corrupção.
+_LATIN1_INDICATOR_BYTES = {0xE7, 0xE3, 0xF5, 0xE9, 0xF4, 0xFA, 0xED, 0xE1, 0xE2, 0xF3}
+
+
+def check_encoding_risk(path: Path, encoding_used: str) -> str | None:
+    """Retorna aviso de risco de encoding se o arquivo pode ter corrupção silenciosa.
+
+    Um arquivo lido como UTF-8 mas com bytes típicos de latin-1 (ç, ã, é, etc.)
+    pode ter sido gravado em cp1252 e decodificado incorretamente, causando:
+    - Falhas silenciosas em joins por diferença de encoding
+    - Corrupção de nomes/cidades com acentos
+
+    Args:
+        path: Arquivo lido.
+        encoding_used: Encoding que o reader usou.
+
+    Returns:
+        String de aviso ou None se sem risco detectado.
+    """
+    if encoding_used in ("latin-1", "latin1", "cp1252"):
+        # Confirma que há de fato caracteres não-ASCII (não é só ASCII puro)
+        raw = path.read_bytes()
+        high_bytes = sum(1 for b in raw if b > 0x7F)
+        if high_bytes > 0:
+            return (
+                f"Encoding latin-1 detectado com {high_bytes} byte(s) não-ASCII — "
+                "risco de corrupção em joins de campos com acentos (ç, ã, é, ô). "
+                "Validar integridade de caracteres especiais pós-migração."
+            )
+    elif encoding_used in ("utf-8", "utf-8-sig"):
+        # Verifica se os bytes brutos contêm padrões típicos de latin-1 mal-decodificados
+        raw = path.read_bytes()
+        suspicious = sum(1 for b in raw if b in _LATIN1_INDICATOR_BYTES)
+        if suspicious > 5:
+            return (
+                f"Arquivo lido como UTF-8 mas contém {suspicious} byte(s) típicos de latin-1 — "
+                "possível encoding incorreto; verificar se dados de entrada estão em cp1252/latin-1."
+            )
+    return None
+
 
 def read_sas_file(path: str | Path, encoding: str | None = None) -> tuple[str, str]:
     """Lê um arquivo SAS, retornando (code, encoding_usado).
@@ -83,12 +128,14 @@ def read_sas_file(path: str | Path, encoding: str | None = None) -> tuple[str, s
     if encoding:
         code = p.read_text(encoding=encoding)
         logger.debug("Reader: leu %s com encoding=%s (%d chars)", p.name, encoding, len(code))
+        _emit_encoding_warning(p, encoding)
         return code, encoding
 
     for enc in _ENCODINGS:
         try:
             code = p.read_text(encoding=enc)
             logger.debug("Reader: leu %s com encoding=%s (%d chars)", p.name, enc, len(code))
+            _emit_encoding_warning(p, enc)
             return code, enc
         except UnicodeDecodeError:
             continue
@@ -96,7 +143,15 @@ def read_sas_file(path: str | Path, encoding: str | None = None) -> tuple[str, s
     # Fallback garantido: latin-1 nunca falha
     code = p.read_text(encoding="latin-1", errors="replace")
     logger.warning("Reader: encoding ambíguo em %s — usando latin-1 com replace", p.name)
+    _emit_encoding_warning(p, "latin-1")
     return code, "latin-1"
+
+
+def _emit_encoding_warning(path: Path, encoding: str) -> None:
+    """Emite warning de encoding se risco detectado."""
+    warning = check_encoding_risk(path, encoding)
+    if warning:
+        logger.warning("Reader [%s]: %s", path.name, warning)
 
 
 def split_blocks(code: str, source_file: Path | None = None) -> list[SASBlock]:
@@ -131,6 +186,16 @@ def split_blocks(code: str, source_file: Path | None = None) -> list[SASBlock]:
             continue
 
         if not in_block:
+            # %INCLUDE: arquivo externo não processado — gera aviso para rastreabilidade
+            if _INCLUDE_LINE.match(stripped):
+                logger.warning(
+                    "Reader: '%s' (linha %d) — %sINCLUDE não é processado recursivamente; "
+                    "dependências do arquivo incluído ficam fora do grafo",
+                    source_file.name if source_file else "<string>",
+                    i,
+                    "%",
+                )
+
             if _BLOCK_START.match(stripped):
                 in_block = True
                 in_macro = bool(re.match(r"^\s*%MACRO\b", stripped, re.IGNORECASE))

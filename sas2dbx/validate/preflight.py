@@ -1,0 +1,212 @@
+"""PreflightChecker — detecta fontes fantasma antes do deploy.
+
+Seção 2.5 do roteiro humano: valida que todas as tabelas de entrada
+referenciadas nos notebooks gerados existem no catálogo Databricks.
+
+Executa ANTES do deploy, eliminando a cascata:
+  TABLE_NOT_FOUND → placeholder → UNRESOLVED_COLUMN → ciclos de healing.
+
+Resultado exposto no relatório de validação como seção "ghost_sources".
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+# Padrões de leitura de tabelas nos notebooks gerados
+_RE_READ_TABLE = re.compile(
+    r'spark\.read\.table\(\s*["\']([^"\']+)["\']\s*\)',
+    re.IGNORECASE,
+)
+_RE_SPARK_SQL_FROM = re.compile(
+    r'FROM\s+([`"\']?[\w.]+[`"\']?)',
+    re.IGNORECASE,
+)
+_RE_SPARK_SQL_JOIN = re.compile(
+    r'JOIN\s+([`"\']?[\w.]+[`"\']?)',
+    re.IGNORECASE,
+)
+
+
+@dataclass
+class GhostSource:
+    """Tabela referenciada mas inexistente no catálogo Databricks."""
+
+    table_name: str
+    notebooks: list[str] = field(default_factory=list)
+    suggestion: str = ""
+
+
+@dataclass
+class PreflightReport:
+    """Resultado do preflight check."""
+
+    ghost_sources: list[GhostSource] = field(default_factory=list)
+    checked_tables: int = 0
+    skipped: bool = False
+    skip_reason: str = ""
+
+    @property
+    def has_ghosts(self) -> bool:
+        return len(self.ghost_sources) > 0
+
+    def summary(self) -> str:
+        if self.skipped:
+            return f"Preflight ignorado: {self.skip_reason}"
+        if not self.has_ghosts:
+            return f"{self.checked_tables} tabela(s) verificada(s) — nenhuma fonte fantasma"
+        names = ", ".join(g.table_name for g in self.ghost_sources[:3])
+        suffix = f" e mais {len(self.ghost_sources) - 3}" if len(self.ghost_sources) > 3 else ""
+        return (
+            f"{self.checked_tables} verificada(s) · "
+            f"{len(self.ghost_sources)} fonte(s) fantasma: {names}{suffix}"
+        )
+
+
+class PreflightChecker:
+    """Verifica existência de tabelas de entrada no catálogo Databricks.
+
+    Args:
+        config: DatabricksConfig com credenciais e catálogo alvo.
+    """
+
+    def __init__(self, config) -> None:
+        self._config = config
+
+    def check(self, output_dir: Path) -> PreflightReport:
+        """Varre notebooks em output_dir e verifica tabelas de entrada.
+
+        Args:
+            output_dir: Diretório com notebooks .py gerados.
+
+        Returns:
+            PreflightReport com fontes fantasma identificadas.
+        """
+        notebooks = sorted(output_dir.glob("*.py"))
+        if not notebooks:
+            return PreflightReport(skipped=True, skip_reason="nenhum notebook encontrado")
+
+        # Coleta todas as tabelas referenciadas nos notebooks
+        table_to_notebooks: dict[str, list[str]] = {}
+        for nb in notebooks:
+            try:
+                content = nb.read_text(encoding="utf-8")
+                tables = self._extract_input_tables(content)
+                for t in tables:
+                    table_to_notebooks.setdefault(t, []).append(nb.stem)
+            except OSError as exc:
+                logger.warning("PreflightChecker: erro ao ler %s: %s", nb.name, exc)
+
+        if not table_to_notebooks:
+            return PreflightReport(skipped=True, skip_reason="nenhuma tabela de entrada detectada")
+
+        # Verifica existência via Databricks API
+        report = PreflightReport(checked_tables=len(table_to_notebooks))
+        try:
+            from databricks.sdk import WorkspaceClient
+            client = WorkspaceClient(
+                host=self._config.host,
+                token=self._config.token,
+            )
+            for table_name, nbs in sorted(table_to_notebooks.items()):
+                exists = self._table_exists(client, table_name)
+                if not exists:
+                    suggestion = self._suggest_action(table_name)
+                    report.ghost_sources.append(
+                        GhostSource(
+                            table_name=table_name,
+                            notebooks=nbs,
+                            suggestion=suggestion,
+                        )
+                    )
+                    logger.info(
+                        "PreflightChecker: fonte fantasma detectada — %s (usada em: %s)",
+                        table_name,
+                        ", ".join(nbs),
+                    )
+        except ImportError:
+            return PreflightReport(
+                skipped=True,
+                skip_reason="databricks-sdk não disponível",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("PreflightChecker: falha ao conectar ao Databricks: %s", exc)
+            return PreflightReport(
+                skipped=True,
+                skip_reason=f"falha na conexão Databricks: {type(exc).__name__}",
+            )
+
+        return report
+
+    # ------------------------------------------------------------------
+    # Internal
+    # ------------------------------------------------------------------
+
+    def _extract_input_tables(self, content: str) -> list[str]:
+        """Extrai tabelas de entrada (leitura) de um notebook.
+
+        Exclui tabelas que aparecem apenas em saveAsTable (escrita).
+        """
+        read_tables: set[str] = set()
+        write_tables: set[str] = set()
+
+        # spark.read.table("...") — sempre leitura
+        for m in _RE_READ_TABLE.finditer(content):
+            read_tables.add(m.group(1).strip("`\"'"))
+
+        # FROM/JOIN em spark.sql — pode ser leitura ou escrita (CREATE TABLE ... AS SELECT)
+        # Heurística: se a tabela aparece em FROM/JOIN mas não em saveAsTable → leitura
+        for m in _RE_SPARK_SQL_FROM.finditer(content):
+            t = m.group(1).strip("`\"'")
+            if "." in t and not t.startswith("("):
+                read_tables.add(t)
+        for m in _RE_SPARK_SQL_JOIN.finditer(content):
+            t = m.group(1).strip("`\"'")
+            if "." in t:
+                read_tables.add(t)
+
+        # saveAsTable — escrita
+        for m in re.finditer(r'saveAsTable\(\s*["\']([^"\']+)["\']\s*\)', content):
+            write_tables.add(m.group(1).strip("`\"'"))
+        # CREATE TABLE ... AS / CREATE OR REPLACE TABLE
+        for m in re.finditer(
+            r'CREATE\s+(?:OR\s+REPLACE\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([`"\']?[\w.]+)',
+            content,
+            re.IGNORECASE,
+        ):
+            write_tables.add(m.group(1).strip("`\"'"))
+
+        # Tabelas de entrada = lidas mas não escritas
+        input_tables = read_tables - write_tables
+
+        # Filtra nomes claramente não-tabela (sem ponto, muito curtos, keywords SQL)
+        _SQL_KEYWORDS = {"dual", "values", "lateral", "unnest"}
+        return [
+            t for t in input_tables
+            if "." in t and len(t) > 3 and t.lower() not in _SQL_KEYWORDS
+        ]
+
+    def _table_exists(self, client, table_name: str) -> bool:
+        """Verifica se a tabela existe no catálogo Databricks."""
+        try:
+            client.tables.get(table_name)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _suggest_action(self, table_name: str) -> str:
+        """Sugere ação para fonte fantasma baseada no nome da tabela."""
+        parts = table_name.split(".")
+        if len(parts) == 3:
+            catalog, schema, table = parts
+            if any(kw in catalog.lower() for kw in ("staging", "temp", "tmp", "work")):
+                return f"Tabela intermediária — verificar se job upstream deve criá-la primeiro"
+            if any(kw in schema.lower() for kw in ("raw", "bronze", "source", "operacional")):
+                return f"Tabela de origem — verificar ingestão de dados ou remapear LIBNAME '{catalog}.{schema}'"
+            return f"Tabela não encontrada no catálogo — verificar mapeamento de LIBNAME"
+        return "Tabela não encontrada — verificar configuração de catalog/schema"

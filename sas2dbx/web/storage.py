@@ -22,6 +22,16 @@ logger = logging.getLogger(__name__)
 
 _STATE_FILENAME = ".sas2dbx_state.json"
 
+_PIPELINE_STEPS_TEMPLATE = [
+    {"id": "extract",      "label": "Extraindo arquivos ZIP",          "status": "pending", "detail": ""},
+    {"id": "scan",         "label": "Escaneando jobs SAS",             "status": "pending", "detail": ""},
+    {"id": "analyze",      "label": "Analisando dependências",         "status": "pending", "detail": ""},
+    {"id": "transpile",    "label": "Transpilando para PySpark",       "status": "pending", "detail": ""},
+    {"id": "document",     "label": "Gerando documentação por job",    "status": "pending", "detail": ""},
+    {"id": "architecture", "label": "Gerando ARCHITECTURE.md",         "status": "pending", "detail": ""},
+    {"id": "explorer",     "label": "Gerando explorer interativo",     "status": "pending", "detail": ""},
+]
+
 
 class MigrationNotFoundError(KeyError):
     """Migração não encontrada no storage."""
@@ -37,6 +47,10 @@ class MigrationStorage:
     def __init__(self, work_dir: Path) -> None:
         self._work_dir = work_dir
         self._work_dir.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def work_dir(self) -> Path:
+        return self._work_dir
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -111,6 +125,36 @@ class MigrationStorage:
             meta["error"] = error
         self.save_meta(migration_id, meta)
 
+    def init_pipeline_steps(self, migration_id: str) -> None:
+        """Inicializa as etapas do pipeline de transpilação no meta.json."""
+        import copy
+        meta = self.get_meta(migration_id)
+        meta["pipeline_steps"] = copy.deepcopy(_PIPELINE_STEPS_TEMPLATE)
+        self.save_meta(migration_id, meta)
+
+    def update_pipeline_step(
+        self,
+        migration_id: str,
+        step_id: str,
+        status: str,
+        detail: str = "",
+    ) -> None:
+        """Atualiza status e detalhe de uma etapa do pipeline.
+
+        Args:
+            step_id: ID da etapa (ex: "extract", "transpile").
+            status: "pending" | "running" | "done" | "failed".
+            detail: Texto curto de progresso exibido abaixo do label.
+        """
+        meta = self.get_meta(migration_id)
+        for step in meta.get("pipeline_steps", []):
+            if step["id"] == step_id:
+                step["status"] = status
+                if detail:
+                    step["detail"] = detail
+                break
+        self.save_meta(migration_id, meta)
+
     # ------------------------------------------------------------------
     # Status consolidado (meta + state)
     # ------------------------------------------------------------------
@@ -162,7 +206,22 @@ class MigrationStorage:
             "progress": progress,
             "jobs": jobs,
             "error": meta.get("error"),
+            "pipeline_steps": meta.get("pipeline_steps", []),
         }
+
+    def delete_migration(self, migration_id: str) -> None:
+        """Remove todos os artefatos de uma migração do disco.
+
+        Raises:
+            MigrationNotFoundError: Se a migração não existir.
+        """
+        import shutil
+
+        path = self._migration_dir(migration_id)
+        if not path.exists():
+            raise MigrationNotFoundError(migration_id)
+        shutil.rmtree(path)
+        logger.info("MigrationStorage: migração %s removida", migration_id)
 
     # ------------------------------------------------------------------
     # List
