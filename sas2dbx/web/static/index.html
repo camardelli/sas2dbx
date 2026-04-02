@@ -364,6 +364,52 @@
     .log-msg.msg-error  { color: #ef4444; }
     .log-empty { color: var(--muted); font-size: .8rem; padding: 20px 0; text-align: center; }
 
+    #btn-quarantine {
+      position: fixed;
+      bottom: 70px; right: 20px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--muted);
+      border-radius: 8px;
+      padding: 8px 14px;
+      font-size: .8rem;
+      cursor: pointer;
+      display: none;
+      align-items: center; gap: 7px;
+      z-index: 999;
+      box-shadow: 0 2px 12px rgba(0,0,0,.3);
+      transition: border-color .15s, color .15s;
+    }
+    #btn-quarantine:hover { border-color: #a78bfa; color: var(--text); }
+    #btn-quarantine.visible { display: flex; }
+    #quarantine-panel {
+      position: fixed; bottom: 120px; right: 20px;
+      width: 600px; max-height: 420px;
+      background: var(--surface); border: 1px solid #a78bfa;
+      border-radius: 10px; box-shadow: 0 8px 32px rgba(0,0,0,.5);
+      display: none; flex-direction: column; z-index: 1001;
+      overflow: hidden;
+    }
+    #quarantine-panel.open { display: flex; }
+    #quarantine-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 14px; border-bottom: 1px solid #a78bfa;
+      font-size: .85rem; font-weight: 600; color: #a78bfa;
+    }
+    #quarantine-body { overflow-y: auto; flex: 1; padding: 10px; }
+    .qentry {
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: 6px; padding: 10px 12px; margin-bottom: 8px;
+      font-size: .78rem;
+    }
+    .qentry-title { font-weight: 600; color: var(--text); margin-bottom: 4px; }
+    .qentry-meta  { color: var(--muted); margin-bottom: 6px; }
+    .qentry-desc  { color: var(--text); margin-bottom: 8px; }
+    .qentry-actions { display: flex; gap: 8px; }
+    .qbtn-approve { background: #166534; color: #bbf7d0; border: none; border-radius: 4px; padding: 4px 12px; cursor: pointer; font-size: .75rem; }
+    .qbtn-reject  { background: #7f1d1d; color: #fecaca; border: none; border-radius: 4px; padding: 4px 12px; cursor: pointer; font-size: .75rem; }
+    .qbtn-approve:hover { background: #15803d; }
+    .qbtn-reject:hover  { background: #991b1b; }
     #btn-log {
       position: fixed;
       bottom: 20px; right: 20px;
@@ -511,6 +557,12 @@
   <div id="detail-error"></div>
 </div>
 
+<!-- ===== BOTÃO QUARENTENA (fixo, canto inferior direito, acima do log) ===== -->
+<button id="btn-quarantine" title="Ver fixes em quarentena aguardando aprovação" onclick="toggleQuarantinePanel()">
+  🧬 Quarentena
+  <span id="btn-quarantine-badge" style="display:none;background:var(--yellow);color:#000;border-radius:9px;padding:0 5px;font-size:10px;margin-left:4px;font-weight:700"></span>
+</button>
+
 <!-- ===== BOTÃO LOG (fixo, canto inferior direito) ===== -->
 <button id="btn-log" title="Ver log da aplicação" onclick="toggleLogPanel()">
   <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
@@ -520,6 +572,15 @@
   Log
   <span id="btn-log-badge"></span>
 </button>
+
+<!-- ===== PAINEL DE QUARENTENA ===== -->
+<div id="quarantine-panel">
+  <div id="quarantine-header">
+    <span>🧬 Fixes em Quarentena — aguardando aprovação humana</span>
+    <button onclick="toggleQuarantinePanel()" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:1rem">✕</button>
+  </div>
+  <div id="quarantine-body"><span style="color:var(--muted);font-size:.8rem">Carregando...</span></div>
+</div>
 
 <!-- ===== PAINEL DE LOG ===== -->
 <div id="log-panel">
@@ -1123,7 +1184,92 @@ function showLogBtn(visible) {
   if (!_log.btn) _logInit();
   if (visible) _log.btn.classList.add("visible");
   else _log.btn.classList.remove("visible");
+  // Botão de quarentena acompanha o botão de log
+  const qBtn = document.getElementById("btn-quarantine");
+  if (qBtn) {
+    if (visible) qBtn.classList.add("visible");
+    else qBtn.classList.remove("visible");
+  }
 }
+
+// ===== QUARENTENA =====
+const _qPanel = { open: false, el: null, body: null, badge: null, btn: null };
+
+function toggleQuarantinePanel() {
+  if (!_qPanel.el) {
+    _qPanel.el   = document.getElementById("quarantine-panel");
+    _qPanel.body = document.getElementById("quarantine-body");
+    _qPanel.badge = document.getElementById("btn-quarantine-badge");
+    _qPanel.btn  = document.getElementById("btn-quarantine");
+  }
+  _qPanel.open = !_qPanel.open;
+  if (_qPanel.open) {
+    _qPanel.el.classList.add("open");
+    _fetchQuarantine();
+  } else {
+    _qPanel.el.classList.remove("open");
+  }
+}
+
+async function _fetchQuarantine() {
+  try {
+    const r = await fetch(`${BASE}/evolution/quarantine`);
+    if (!r.ok) { _qPanel.body.innerHTML = '<span style="color:var(--red)">Erro ao carregar quarentena.</span>'; return; }
+    const data = await r.json();
+    const items = data.entries || [];
+
+    // Atualiza badge
+    if (_qPanel.badge) {
+      if (items.length > 0) {
+        _qPanel.badge.textContent = items.length;
+        _qPanel.badge.style.display = "inline";
+      } else {
+        _qPanel.badge.style.display = "none";
+      }
+    }
+
+    if (items.length === 0) {
+      _qPanel.body.innerHTML = '<span style="color:var(--muted);font-size:.8rem">Nenhum fix em quarentena.</span>';
+      return;
+    }
+    _qPanel.body.innerHTML = "";
+    for (const q of items) {
+      const div = document.createElement("div");
+      div.className = "qentry";
+      div.innerHTML = `
+        <div class="qentry-title">${encodeHTML(q.job_id || "?")} — ${encodeHTML(q.fix_type || "?")} (risk=${encodeHTML(q.risk_level || "?")})</div>
+        <div class="qentry-meta">ID: ${encodeHTML(q.id || "?")} · ${encodeHTML(q.submitted_at || "")}</div>
+        <div class="qentry-desc">${encodeHTML(q.description || "")}</div>
+        <div class="qentry-actions">
+          <button class="qbtn-approve" onclick="_quarantineAction('${encodeHTML(q.id)}','approve')">✓ Aprovar</button>
+          <button class="qbtn-reject"  onclick="_quarantineAction('${encodeHTML(q.id)}','reject')">✗ Rejeitar</button>
+        </div>`;
+      _qPanel.body.appendChild(div);
+    }
+  } catch(e) {
+    _qPanel.body.innerHTML = `<span style="color:var(--red)">Erro: ${encodeHTML(e.message)}</span>`;
+  }
+}
+
+async function _quarantineAction(id, action) {
+  try {
+    const r = await fetch(`${BASE}/evolution/quarantine/${id}/${action}`, { method: "POST" });
+    if (!r.ok) { alert(`Falha ao ${action} fix: ${r.status}`); return; }
+    _fetchQuarantine();
+  } catch(e) { alert(`Erro: ${e.message}`); }
+}
+
+// Polling do badge de quarentena em background (30s)
+setInterval(async () => {
+  try {
+    const r = await fetch(`${BASE}/evolution/quarantine`);
+    if (!r.ok) return;
+    const data = await r.json();
+    const n = (data.entries || []).length;
+    const badge = document.getElementById("btn-quarantine-badge");
+    if (badge) { badge.textContent = n; badge.style.display = n > 0 ? "inline" : "none"; }
+  } catch(_) {}
+}, 30000);
 
 function toggleLogPanel() {
   if (!_log.panel) _logInit();

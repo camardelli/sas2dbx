@@ -80,10 +80,19 @@ class QualityGate:
         if not proposal.is_valid:
             return GateResult("REJECT", f"Proposta inválida: fix_type={proposal.fix_type!r}")
 
-        # Etapa 2: Escopo de arquivos
+        # Etapa 2: Escopo de arquivos — violação escala para QUARANTINE (não descarta)
+        # O LLM pode propor um arquivo fora do escopo do risk_level declarado, mas a
+        # proposta ainda tem valor: vai para revisão humana em vez de ser descartada.
         scope_check = self._check_file_scope(proposal)
         if scope_check:
-            return GateResult("REJECT", scope_check)
+            logger.info(
+                "QualityGate: escopo violado (%s) — escalando para QUARANTINE em vez de REJECT",
+                scope_check,
+            )
+            return GateResult(
+                "QUARANTINE",
+                f"Escopo violado (escalado para revisão humana): {scope_check}",
+            )
 
         # Fixes de alto risco vão direto para quarentena (sem sandbox)
         if proposal.risk_level == "high":

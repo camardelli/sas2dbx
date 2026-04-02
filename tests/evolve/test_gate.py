@@ -94,8 +94,9 @@ class TestQualityGateDecisions:
             ],
         )
         result = self.gate.evaluate(proposal)
-        assert result.decision == "REJECT"
-        assert "fora do escopo" in result.reason.lower()
+        # Violação de escopo escala para QUARANTINE (não descarta — vai para revisão humana)
+        assert result.decision == "QUARANTINE"
+        assert "escopo" in result.reason.lower()
 
     def test_approve_when_tests_pass(self):
         """Simula gate aprovando quando pytest retorna 0."""

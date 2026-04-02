@@ -37,11 +37,15 @@ ALLOWED_PATHS: dict[str, list[str]] = {
         "knowledge/mappings/generated/",
         "knowledge/mappings/curated/",
         "sas2dbx/validate/heal/patterns.py",
+        # fixer.py é o handler natural de patterns.py — um error_pattern fix
+        # quase sempre requer os dois arquivos juntos (regex + handler)
+        "sas2dbx/validate/heal/fixer.py",
     ],
     "medium": [
         "knowledge/mappings/generated/",
         "knowledge/mappings/curated/",
         "sas2dbx/validate/heal/patterns.py",
+        "sas2dbx/validate/heal/fixer.py",
         "sas2dbx/transpile/llm/prompts.py",
         "sas2dbx/document/prompts.py",
     ],
