@@ -224,9 +224,17 @@ class QualityGate:
                                 encoding="utf-8",
                             )
                         else:
-                            logger.warning(
-                                "QualityGate sandbox: old_string não encontrado em %s", fm.path
+                            logger.error(
+                                "QualityGate sandbox: old_string não encontrado em %s — abortando sandbox",
+                                fm.path,
                             )
+                            return {
+                                "passed": False,
+                                "output": (
+                                    f"old_string não encontrado em '{fm.path}' — "
+                                    "fix não aplicado (modificação abortada)"
+                                ),
+                            }
                     else:
                         target.write_text(fm.content, encoding="utf-8")
 

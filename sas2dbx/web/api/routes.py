@@ -601,7 +601,7 @@ async def list_quarantine(request: Request):
 
     storage: MigrationStorage = request.app.state.storage
     store = QuarantineStore(storage.work_dir / "catalog" / "quarantine.json")
-    return {"pending": store.list_pending(), "count": store.count_pending()}
+    return {"entries": store.list_pending(), "count": store.count_pending()}
 
 
 @router.post("/evolution/quarantine/{entry_id}/approve")

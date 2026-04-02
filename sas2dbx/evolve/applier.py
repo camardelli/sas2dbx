@@ -246,10 +246,10 @@ class FixApplier:
                     )
                     return True
                 else:
-                    logger.warning(
-                        "FixApplier: old_string não encontrado em %s — pulando", fm.path
+                    raise ValueError(
+                        f"old_string não encontrado em '{fm.path}' — "
+                        "fix abortado com rollback automático"
                     )
-                    return False
             else:
                 target.write_text(fm.content, encoding="utf-8")
                 return True
