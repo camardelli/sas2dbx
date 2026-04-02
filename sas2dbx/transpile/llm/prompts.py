@@ -24,11 +24,20 @@ REGRAS:
 6. Use F.col() para referências de colunas, NUNCA df["col"]
 7. Para datasets SAS, use spark.read.table("{catalog}.{schema}.<tabela>")
 8. Para output datasets, use .write.mode("overwrite").saveAsTable("{catalog}.{schema}.<tabela>")
-9. Para macro-variáveis SAS (&VAR): converta como variável Python com valor padrão hardcoded.
+   NUNCA adicione .orderBy() imediatamente antes de .write.saveAsTable() — Delta Lake não preserva
+   ordem de linha; o sort é descartado e custa um shuffle global desnecessário.
+   Exceção: .orderBy() dentro de Window functions (partitionBy/orderBy) é necessário e correto.
+9. Para contar linhas após gravar, use SEMPRE spark.table("<tabela>").count() — NUNCA df.count()
+   após saveAsTable(), pois o DataFrame original é lazy e re-executa toda a cadeia do zero.
+   Correto:  df.write.mode("overwrite").saveAsTable("cat.sch.tab")
+             print(spark.table("cat.sch.tab").count())
+   Errado:   df.write.mode("overwrite").saveAsTable("cat.sch.tab")
+             print(df.count())  # re-executa toda a query!
+10. Para macro-variáveis SAS (&VAR): converta como variável Python com valor padrão hardcoded.
    NUNCA use spark.conf.get() sem prefixo "spark." — isso causa CONFIG_NOT_AVAILABLE no serverless.
    Correto: DT_REFERENCIA = "2024-01-01"  # ajustar conforme necessário
    Errado:  DT_REFERENCIA = spark.conf.get("DT_REFERENCIA")
-10. Se encontrar construto que NÃO consegue converter com certeza, retorne:
+11. Se encontrar construto que NÃO consegue converter com certeza, retorne:
    # WARNING: [tipo_construto] na linha [N] requer revisão manual
    # SAS original: [código]
 
@@ -66,7 +75,8 @@ DICA PROC REPORT: Converta para agregação PySpark + display/saveAsTable.
 - DEFINE var / ANALYSIS MEAN|SUM|N → .groupBy().agg(F.mean(), F.sum(), F.count())
 - DEFINE var / GROUP → chave de agrupamento (groupBy)
 - DEFINE var / DISPLAY → coluna de detalhe (sem agregação)
-- ORDER= → .orderBy()
+- ORDER= → .orderBy() APENAS para display() no notebook; NUNCA antes de saveAsTable()
+  (Delta Lake não preserva ordem — o sort seria descartado e custaria um shuffle global)
 - Output: salvar com saveAsTable(); resultado pode ter subtotais → union com totais se necessário
 """,
     "HASH_OBJECT": """\
