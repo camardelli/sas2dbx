@@ -49,6 +49,8 @@ class MigrationWorker:
         # C1/C2: EvolutionEngine singleton — construído uma vez, compartilhado entre heals
         # Evita reconectar LLMClient e re-carregar HealthMonitor a cada _try_evolve()
         self._evolution_engine = None  # lazy init na primeira chamada (api_key pode não estar disponível no boot)
+        # Cancelamento cooperativo: cada migration_id tem um Event que a thread verifica
+        self._cancel_events: dict[str, threading.Event] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -95,6 +97,34 @@ class MigrationWorker:
             "MigrationWorker: healing %s iniciado para migração %s",
             healing_id, migration_id,
         )
+
+    def cancel(self, migration_id: str) -> None:
+        """Sinaliza cancelamento cooperativo para a thread da migração.
+
+        A thread verifica o evento entre cada notebook no loop de validação
+        e entre etapas do pipeline principal. Não mata a thread imediatamente.
+        """
+        event = self._cancel_events.get(migration_id)
+        if event:
+            event.set()
+            logger.info("MigrationWorker: sinal de cancelamento enviado para %s", migration_id)
+        else:
+            logger.warning("MigrationWorker: sem thread ativa para cancelar %s", migration_id)
+
+    def _is_cancelled(self, migration_id: str) -> bool:
+        """Verifica se o cancelamento foi solicitado para esta migração."""
+        event = self._cancel_events.get(migration_id)
+        return event is not None and event.is_set()
+
+    def _register_cancel(self, migration_id: str) -> threading.Event:
+        """Cria e registra um Event de cancelamento para a migração."""
+        event = threading.Event()
+        self._cancel_events[migration_id] = event
+        return event
+
+    def _unregister_cancel(self, migration_id: str) -> None:
+        """Remove o Event de cancelamento após término da thread."""
+        self._cancel_events.pop(migration_id, None)
 
     def start_validation(
         self,
@@ -329,6 +359,14 @@ class MigrationWorker:
                     )
 
             for idx, nb in enumerate(notebooks):
+                # Verifica cancelamento antes de cada notebook (evita deploys desnecessários)
+                if self._is_cancelled(migration_id):
+                    logger.info(
+                        "MigrationWorker[validate %s]: cancelamento detectado antes de [%d/%d] — abortando loop",
+                        migration_id, idx + 1, total,
+                    )
+                    break
+
                 nb_name = nb.stem
                 logger.info(
                     "MigrationWorker[validate %s]: [%d/%d] processando %s",
@@ -454,8 +492,9 @@ class MigrationWorker:
                 ],
             }
 
+            validation_status = "cancelled" if self._is_cancelled(migration_id) else "done"
             meta = self._storage.get_meta(migration_id)
-            meta["validation"] = {"status": "done", "report": report}
+            meta["validation"] = {"status": validation_status, "report": report}
             self._storage.save_meta(migration_id, meta)
             logger.info(
                 "MigrationWorker[validate %s]: concluído — %d/%d ok",
@@ -580,25 +619,35 @@ class MigrationWorker:
 
     def _run(self, migration_id: str) -> None:
         """Ponto de entrada da thread — captura exceções de infraestrutura."""
+        self._register_cancel(migration_id)
         try:
             self._storage.update_status(migration_id, "processing")
             self._execute_pipeline(migration_id)
-            self._storage.update_status(migration_id, "done")
-            self._catalog.record_migration(migration_id)
-            logger.info("MigrationWorker: migração %s concluída com sucesso", migration_id)
+            if self._is_cancelled(migration_id):
+                self._storage.update_status(migration_id, "cancelled")
+                logger.info("MigrationWorker: migração %s cancelada", migration_id)
+            else:
+                self._storage.update_status(migration_id, "done")
+                self._catalog.record_migration(migration_id)
+                logger.info("MigrationWorker: migração %s concluída com sucesso", migration_id)
         except Exception as exc:  # noqa: BLE001
-            error_msg = f"{type(exc).__name__}: {exc}"
-            logger.exception("MigrationWorker: falha na migração %s", migration_id)
-            # Marca etapa em execução como falha para o frontend refletir
-            try:
-                meta = self._storage.get_meta(migration_id)
-                for step in meta.get("pipeline_steps", []):
-                    if step["status"] == "running":
-                        step["status"] = "failed"
-                self._storage.save_meta(migration_id, meta)
-            except Exception:  # noqa: BLE001
-                pass
-            self._storage.update_status(migration_id, "failed", error=error_msg)
+            if self._is_cancelled(migration_id):
+                self._storage.update_status(migration_id, "cancelled")
+                logger.info("MigrationWorker: migração %s cancelada (interrompeu exceção)", migration_id)
+            else:
+                error_msg = f"{type(exc).__name__}: {exc}"
+                logger.exception("MigrationWorker: falha na migração %s", migration_id)
+                try:
+                    meta = self._storage.get_meta(migration_id)
+                    for step in meta.get("pipeline_steps", []):
+                        if step["status"] == "running":
+                            step["status"] = "failed"
+                    self._storage.save_meta(migration_id, meta)
+                except Exception:  # noqa: BLE001
+                    pass
+                self._storage.update_status(migration_id, "failed", error=error_msg)
+        finally:
+            self._unregister_cancel(migration_id)
 
     def _execute_pipeline(self, migration_id: str) -> None:
         """Executa as etapas do pipeline em sequência."""

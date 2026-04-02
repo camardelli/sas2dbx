@@ -461,6 +461,39 @@ async def get_validation_report(
 
 
 # ---------------------------------------------------------------------------
+# Cancel endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/migrations/{migration_id}/cancel", status_code=200)
+async def cancel_migration(migration_id: UUID, request: Request):
+    """Sinaliza cancelamento cooperativo para a thread de migração ou validação.
+
+    Não mata a thread imediatamente — a thread verifica o sinal entre cada
+    notebook no loop de deploy/execução e para de processar os próximos jobs.
+    O status é atualizado para 'cancelled' pelo próprio worker ao detectar o sinal.
+    """
+    worker: MigrationWorker = request.app.state.worker
+    storage: MigrationStorage = request.app.state.storage
+
+    meta = storage.get_meta(str(migration_id))
+    if not meta:
+        raise HTTPException(status_code=404, detail="Migração não encontrada.")
+
+    status = meta.get("status", "")
+    if status not in ("processing", "pending"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Migração não está em execução (status={status!r}).",
+        )
+
+    worker.cancel(str(migration_id))
+    storage.update_status(str(migration_id), "cancelled")
+    logger.info("cancel_migration: %s marcada como cancelled", migration_id)
+    return {"migration_id": str(migration_id), "status": "cancelled"}
+
+
+# ---------------------------------------------------------------------------
 # Sprint 9 — Self-Healing endpoints
 # ---------------------------------------------------------------------------
 

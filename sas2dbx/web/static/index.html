@@ -153,6 +153,7 @@
     .badge-processing{ background: rgba(59,130,246,.15); color: var(--blue); }
     .badge-done      { background: rgba(34,197,94,.15);  color: var(--green); }
     .badge-failed    { background: rgba(239,68,68,.15);  color: var(--red); }
+    .badge-cancelled { background: rgba(156,163,175,.15); color: var(--muted); }
 
     /* ---- Tela 2 ---- */
     #back-btn {
@@ -541,6 +542,14 @@
     </div>
   </div>
 
+  <!-- Card: Cancelar (visível apenas durante processamento) -->
+  <div class="card" id="detail-cancel-card" style="display:none">
+    <div class="action-bar">
+      <button class="btn-action danger" id="btn-cancel-migration">⏹ Cancelar processamento</button>
+      <span id="cancel-status" style="font-size:.8rem;color:var(--muted);margin-left:8px"></span>
+    </div>
+  </div>
+
   <!-- Card: Validação & Healing -->
   <div class="card" id="detail-validation-card" style="display:none">
     <h2>Validação Databricks</h2>
@@ -629,9 +638,9 @@ function encodeHTML(s) {
 }
 
 function badge(status) {
-  const allowed = ["pending", "processing", "done", "failed"];
+  const allowed = ["pending", "processing", "done", "failed", "cancelled"];
   const safe = allowed.includes(status) ? status : "pending";
-  const cls = { pending: "badge-pending", processing: "badge-processing", done: "badge-done", failed: "badge-failed" }[safe];
+  const cls = { pending: "badge-pending", processing: "badge-processing", done: "badge-done", failed: "badge-failed", cancelled: "badge-cancelled" }[safe];
   return `<span class="badge ${cls}">${safe}</span>`;
 }
 
@@ -785,10 +794,15 @@ async function fetchStatus(id) {
     const r = await apiFetch(`/migrations/${id}`);
     const data = await r.json();
     renderStatus(data);
-    if (data.status === "done" || data.status === "failed") {
+    if (data.status === "done" || data.status === "failed" || data.status === "cancelled") {
       stopPolling();
       if (data.status === "done") fetchResultLinks(id);
+      document.getElementById("detail-cancel-card").style.display = "none";
       document.getElementById("detail-delete-card").style.display = "block";
+      if (data.status === "cancelled") {
+        document.getElementById("pipeline-steps").innerHTML = "";
+        document.getElementById("validation-error").innerHTML = "";
+      }
     }
   } catch (e) {
     stopPolling();
@@ -799,6 +813,9 @@ async function fetchStatus(id) {
 
 function renderStatus(data) {
   const isRunning = data.status === "processing" || data.status === "pending";
+
+  // Botão Cancelar — visível apenas durante processamento
+  document.getElementById("detail-cancel-card").style.display = isRunning ? "block" : "none";
 
   // Status badge
   const statusEl = document.getElementById("detail-status");
@@ -903,6 +920,41 @@ document.getElementById("btn-delete-migration").addEventListener("click", () => 
   const id = document.getElementById("detail-id").textContent;
   deleteMigration(id);
 });
+
+async function cancelMigration() {
+  const id = currentMigrationId();
+  if (!id) return;
+  const btn = document.getElementById("btn-cancel-migration");
+  const statusEl = document.getElementById("cancel-status");
+  btn.disabled = true;
+  btn.textContent = "Cancelando…";
+  statusEl.textContent = "Aguardando a thread parar entre notebooks…";
+  try {
+    await apiFetch(`/migrations/${id}/cancel`, { method: "POST" });
+    // Para polling imediatamente
+    stopPolling();
+    if (_validationTimer) { clearInterval(_validationTimer); _validationTimer = null; }
+    Object.keys(_healingTimers).forEach(k => { clearInterval(_healingTimers[k]); delete _healingTimers[k]; });
+    // Limpa telas
+    document.getElementById("pipeline-steps").innerHTML = "";
+    document.getElementById("transpile-steps").innerHTML = "";
+    document.getElementById("validation-error").innerHTML = "";
+    document.getElementById("detail-validation-card").style.display = "none";
+    document.getElementById("detail-cancel-card").style.display = "none";
+    document.getElementById("detail-delete-card").style.display = "block";
+    document.getElementById("detail-status").innerHTML = badge("cancelled");
+    document.getElementById("progress-label").textContent = "Cancelado";
+    btn.disabled = false;
+    btn.textContent = "⏹ Cancelar processamento";
+    statusEl.textContent = "";
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = "⏹ Cancelar processamento";
+    statusEl.textContent = "Erro: " + e.message;
+  }
+}
+
+document.getElementById("btn-cancel-migration").addEventListener("click", cancelMigration);
 
 // ============================================================
 // Validação & Healing — fluxo completo automatizado
