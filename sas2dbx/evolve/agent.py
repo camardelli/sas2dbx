@@ -263,7 +263,8 @@ class EvolutionAnalyzer:
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 future = pool.submit(asyncio.run, self._analyze_async(error))
-                return future.result(timeout=120)
+                # 240s: 8192 tokens em Claude Sonnet pode ultrapassar 120s com retry
+                return future.result(timeout=240)
         else:
             return loop.run_until_complete(self._analyze_async(error))
 

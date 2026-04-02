@@ -46,6 +46,9 @@ class MigrationWorker:
         self._storage = storage
         self._llm_config = llm_config
         self._catalog = GlobalCatalog(storage.work_dir)
+        # C1/C2: EvolutionEngine singleton — construído uma vez, compartilhado entre heals
+        # Evita reconectar LLMClient e re-carregar HealthMonitor a cada _try_evolve()
+        self._evolution_engine = None  # lazy init na primeira chamada (api_key pode não estar disponível no boot)
 
     # ------------------------------------------------------------------
     # Public API
@@ -356,6 +359,20 @@ class MigrationWorker:
                 notebook_results.append(nb_result)
                 _save_progress()
 
+                # C2: checkpoint do HealthMonitor a cada 50 notebooks para alimentar
+                # /evolution/health sem esperar o fim da validação inteira
+                if self._evolution_engine is not None and (idx + 1) % 50 == 0:
+                    try:
+                        qp = self._evolution_engine.quarantine.count_pending()
+                        self._evolution_engine.health.checkpoint(
+                            jobs_processed=idx + 1,
+                            jobs_total=total,
+                            quarantine_pending=qp,
+                            human_review_pending=qp,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+
                 # GAP-2: antes de interromper, tenta static healing inline.
                 # Aplica somente quando temos deployer + executor ativos (não em
                 # deploy_only / collect_only) e o notebook acabou de falhar.
@@ -457,10 +474,17 @@ class MigrationWorker:
     # ------------------------------------------------------------------
 
     def _get_evolution_engine(self):
-        """Constrói EvolutionEngine com LLMClient e HealthMonitor compartilhado."""
+        """Retorna EvolutionEngine singleton (lazy init na primeira chamada).
+
+        C1: Instância única compartilhada — evita reconectar LLMClient e
+        re-carregar HealthMonitor do disco a cada _try_evolve().
+        """
+        if self._evolution_engine is not None:
+            return self._evolution_engine
+
         from sas2dbx.evolve.engine import EvolutionEngine
         from sas2dbx.evolve.health import HealthMonitor
-        from sas2dbx.transpile.llm.client import LLMClient, LLMConfig
+        from sas2dbx.transpile.llm.client import LLMClient
         import dataclasses
 
         # Evolução precisa de mais tokens — resposta inclui código de teste completo
@@ -469,12 +493,13 @@ class MigrationWorker:
         project_root = Path(__file__).resolve().parents[2]
         health_path = self._storage.work_dir / "catalog" / "health_snapshots.json"
         health = HealthMonitor(health_path)
-        return EvolutionEngine(
+        self._evolution_engine = EvolutionEngine(
             llm_client=llm,
             project_root=project_root,
             health_monitor=health,
             unresolved_dir=self._storage.work_dir / "catalog" / "unresolved",
         )
+        return self._evolution_engine
 
     def _try_evolve(
         self,
@@ -523,6 +548,20 @@ class MigrationWorker:
                 "MigrationWorker[heal %s]: evolution concluído — gate=%s applied=%s",
                 healing_id, result.gate_decision, result.applied,
             )
+
+            # C2: checkpoint após cada decisão do EvolutionEngine para que
+            # /evolution/health reflita o estado atual (sem checkpoint o arquivo nunca é criado)
+            try:
+                engine = self._get_evolution_engine()
+                quarantine_pending = engine.quarantine.count_pending()
+                engine.health.checkpoint(
+                    jobs_processed=1,
+                    jobs_total=1,
+                    quarantine_pending=quarantine_pending,
+                    human_review_pending=quarantine_pending,
+                )
+            except Exception:  # noqa: BLE001
+                pass  # checkpoint é melhor esforço — não bloqueia healing
 
         except Exception as exc:  # noqa: BLE001
             logger.warning(

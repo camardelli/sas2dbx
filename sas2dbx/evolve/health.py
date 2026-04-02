@@ -231,6 +231,9 @@ class HealthMonitor:
             jobs_processed, jobs_total, quarantine_pending, human_review_pending
         )
         self._snapshots.append(health)
+        # Mantém no máximo 200 snapshots em memória (evita crescimento ilimitado)
+        if len(self._snapshots) > 200:
+            self._snapshots = self._snapshots[-200:]
         self._save()
 
         # Tendência de queda em 3 checkpoints consecutivos

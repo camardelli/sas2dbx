@@ -606,9 +606,14 @@ async def list_quarantine(request: Request):
 
 @router.post("/evolution/quarantine/{entry_id}/approve")
 async def approve_quarantine(entry_id: str, request: Request):
-    """Aprova um fix em quarentena e o aplica no código-fonte."""
+    """Aprova um fix em quarentena e dispara aplicação em background thread.
+
+    C3: FixApplier.apply() é síncrono e pode levar minutos (pytest no QualityGate).
+    Retornamos imediatamente com status="applying" para não bloquear o servidor HTTP.
+    O resultado fica registrado em evolution_history.json (consultável via /evolution/history).
+    """
+    import threading
     from sas2dbx.evolve.quarantine import QuarantineStore
-    from sas2dbx.evolve.gate import QualityGate
     from sas2dbx.evolve.applier import FixApplier
     from pathlib import Path
 
@@ -621,18 +626,27 @@ async def approve_quarantine(entry_id: str, request: Request):
     if not proposal:
         raise HTTPException(status_code=404, detail=f"Entrada {entry_id} não encontrada.")
 
-    # Aplica o fix aprovado
     project_root = Path(__file__).resolve().parents[3]
-    applier = FixApplier(
-        project_root,
-        history_path=storage.work_dir / "catalog" / "evolution_history.json",
-    )
-    result = applier.apply(proposal)
+    history_path = storage.work_dir / "catalog" / "evolution_history.json"
+
+    def _apply_in_background():
+        try:
+            applier = FixApplier(project_root, history_path=history_path)
+            result = applier.apply(proposal)
+            logger.info(
+                "approve_quarantine[%s]: apply concluído — status=%s files=%s",
+                entry_id, result.status, result.files_modified,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("approve_quarantine[%s]: apply falhou: %s", entry_id, exc)
+
+    thread = threading.Thread(target=_apply_in_background, daemon=True, name=f"approve-{entry_id[:8]}")
+    thread.start()
+
     return {
         "entry_id": entry_id,
-        "status": result.status,
-        "files_modified": result.files_modified,
-        "hot_reloaded": result.hot_reloaded,
+        "status": "applying",
+        "message": "Fix aprovado e sendo aplicado em background. Consulte /evolution/history para o resultado.",
     }
 
 

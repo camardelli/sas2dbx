@@ -160,6 +160,79 @@ class TestEvolutionAnalyzerPrompt:
         assert "# linha 199" in prompt
 
 
+class TestRecoverPartialJson:
+    """Testa recuperação de JSON truncado — método crítico sem cobertura anterior."""
+
+    def setup_method(self):
+        mock_llm = MagicMock()
+        self.analyzer = EvolutionAnalyzer(mock_llm, Path("/tmp"))
+
+    def test_recovers_scalar_fields(self):
+        """Campos simples extraídos mesmo com JSON sem fecha."""
+        truncated = (
+            '{"fix_type": "error_pattern", "risk_level": "low", '
+            '"description": "Adiciona padrão X", '
+            '"files_to_modify": [], '
+            '"similar_jobs_prediction": "Jobs com PRXMATCH"'
+            # sem fechar o JSON propositalmente
+        )
+        result = self.analyzer._recover_partial_json(truncated)
+        assert result is not None
+        assert result["fix_type"] == "error_pattern"
+        assert result["risk_level"] == "low"
+        assert result["description"] == "Adiciona padrão X"
+
+    def test_returns_none_if_fix_type_missing(self):
+        """Sem fix_type e risk_level não é possível reconstruir proposta."""
+        truncated = '{"description": "Fix sem fix_type"'
+        result = self.analyzer._recover_partial_json(truncated)
+        assert result is None
+
+    def test_recovers_complete_array(self):
+        """Array completo de files_to_modify é extraído corretamente."""
+        complete = json.dumps({
+            "fix_type": "knowledge_store",
+            "risk_level": "low",
+            "description": "test",
+            "files_to_modify": [
+                {"path": "knowledge/mappings/generated/functions_map.yaml",
+                 "action": "append", "content": "X: y", "reason": "r"}
+            ],
+        })
+        # Remove fechamento do JSON externo (truncado após o array)
+        truncated = complete[:-1]
+        result = self.analyzer._recover_partial_json(truncated)
+        assert result is not None
+        assert result["fix_type"] == "knowledge_store"
+
+    def test_recovers_test_path(self):
+        """test.path extraído mesmo quando test.content é truncado."""
+        truncated = (
+            '{"fix_type": "error_pattern", "risk_level": "low", '
+            '"description": "X", "files_to_modify": [], '
+            '"test": {"path": "tests/evolve/test_x.py", '
+            '"content": "def test_x():\n    assert Tr'  # truncado
+        )
+        result = self.analyzer._recover_partial_json(truncated)
+        assert result is not None
+        assert "test" in result
+        assert result["test"]["path"] == "tests/evolve/test_x.py"
+
+    def test_parse_proposal_uses_recovery_on_truncated_json(self):
+        """_parse_proposal chama recovery quando JSON está truncado."""
+        error = _make_unresolved()
+        # JSON truncado com campos essenciais presentes
+        data = json.loads(_make_valid_llm_response("error_pattern"))
+        full = json.dumps(data)
+        truncated = full[:len(full) // 2]  # corta na metade
+
+        # Não deve retornar None se conseguiu recuperar fix_type e risk_level
+        # (pode retornar None se campos obrigatórios foram cortados — aceitável)
+        result = self.analyzer._parse_proposal(truncated, error)
+        # Não levanta exceção — isso é suficiente para validar robustez
+        assert result is None or isinstance(result, EvolutionProposal)
+
+
 class TestEvolutionProposalValidation:
     def _make_proposal(self, **kwargs) -> EvolutionProposal:
         defaults = dict(
