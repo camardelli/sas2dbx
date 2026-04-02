@@ -460,9 +460,12 @@ class MigrationWorker:
         """Constrói EvolutionEngine com LLMClient e HealthMonitor compartilhado."""
         from sas2dbx.evolve.engine import EvolutionEngine
         from sas2dbx.evolve.health import HealthMonitor
-        from sas2dbx.transpile.llm.client import LLMClient
+        from sas2dbx.transpile.llm.client import LLMClient, LLMConfig
+        import dataclasses
 
-        llm = LLMClient(self._llm_config)
+        # Evolução precisa de mais tokens — resposta inclui código de teste completo
+        evolution_config = dataclasses.replace(self._llm_config, max_tokens=8192)
+        llm = LLMClient(evolution_config)
         project_root = Path(__file__).resolve().parents[2]
         health_path = self._storage.work_dir / "catalog" / "health_snapshots.json"
         health = HealthMonitor(health_path)

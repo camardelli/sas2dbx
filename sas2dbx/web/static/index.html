@@ -1034,9 +1034,24 @@ async function pollHealing(id, healingId) {
       document.getElementById("btn-validate").disabled = false;
     } else {
       const err = data.error || data.description || "Não foi possível corrigir automaticamente";
+      let evolHtml = "";
+      if (data.evolution) {
+        const ev = data.evolution;
+        if (ev.error) {
+          evolHtml = `<div class="step-sub" style="color:var(--yellow)">⚠ EvolutionEngine: ${encodeHTML(ev.error)}</div>`;
+        } else if (ev.gate_decision === "NO_PROPOSAL") {
+          evolHtml = `<div class="step-sub" style="color:var(--yellow)">🧬 EvolutionEngine: análise sem proposta válida (JSON truncado ou LLM inconclusivo)</div>`;
+        } else if (ev.applied) {
+          evolHtml = `<div class="step-sub" style="color:#a78bfa">🧬 EvolutionEngine aplicou fix: <b>${encodeHTML(ev.fix_type)}</b> (risk=${encodeHTML(ev.risk_level)}) — ${encodeHTML(ev.description)}</div>`;
+        } else if (ev.gate_decision === "QUARANTINE") {
+          evolHtml = `<div class="step-sub" style="color:#a78bfa">🧬 EvolutionEngine: fix em quarentena aguardando aprovação humana (ID: ${encodeHTML(ev.quarantine_entry_id || "?")})</div>`;
+        } else if (ev.gate_decision) {
+          evolHtml = `<div class="step-sub" style="color:var(--yellow)">🧬 EvolutionEngine: gate=${encodeHTML(ev.gate_decision)} fix_type=${encodeHTML(ev.fix_type || "?")} aplicado=${ev.applied}</div>`;
+        }
+      }
       renderPipelineStep("result", "failed", "Auto-Healing",
         `Não corrigido após ${data.iterations} iteração(ões)`,
-        `<div class="step-sub" style="color:var(--red)">${encodeHTML(err)}</div>`);
+        `<div class="step-sub" style="color:var(--red)">${encodeHTML(err)}</div>${evolHtml}`);
       document.getElementById("btn-validate").textContent = "Tentar novamente";
       document.getElementById("btn-validate").disabled = false;
     }

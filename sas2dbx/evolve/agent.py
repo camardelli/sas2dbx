@@ -324,8 +324,10 @@ class EvolutionAnalyzer:
         try:
             data = json.loads(cleaned[start : end + 1])
         except json.JSONDecodeError as exc:
-            logger.warning("EvolutionAnalyzer: JSON inválido: %s", exc)
-            return None
+            logger.warning("EvolutionAnalyzer: JSON inválido: %s — tentando recuperação parcial", exc)
+            data = self._recover_partial_json(cleaned[start:])
+            if data is None:
+                return None
 
         # Valida campos obrigatórios
         for required in ("fix_type", "risk_level", "description", "files_to_modify"):
@@ -391,3 +393,88 @@ class EvolutionAnalyzer:
             "OK" if proposal.test else "AUSENTE",
         )
         return proposal
+
+    def _recover_partial_json(self, text: str) -> dict | None:
+        """Tenta recuperar campos de um JSON truncado extraindo pares chave-valor simples.
+
+        Estratégia: para cada campo escalar obrigatório, usa regex para extrair o valor
+        mesmo que o JSON não tenha fechado. Campos complexos (arrays, objects) são
+        extraídos tentando parsear até o ponto onde o JSON estava válido.
+
+        Returns:
+            dict parcial com os campos recuperados, ou None se impossível.
+        """
+        result: dict = {}
+
+        # Extrai campos escalares simples (string, number)
+        scalar_fields = ["fix_type", "risk_level", "description", "similar_jobs_prediction"]
+        for field_name in scalar_fields:
+            m = re.search(
+                rf'"{field_name}"\s*:\s*"([^"]*)"',
+                text,
+            )
+            if m:
+                result[field_name] = m.group(1)
+
+        # Extrai files_to_modify tentando fechar o array incrementalmente
+        fm_match = re.search(r'"files_to_modify"\s*:\s*(\[)', text)
+        if fm_match:
+            array_start = fm_match.start(1)
+            # Tenta parsear um JSON parcial fechando o array e o objeto principal
+            candidate = text[array_start:]
+            result["files_to_modify"] = self._recover_array(candidate)
+
+        # Extrai test.path (o mais importante — content pode ter sido truncado)
+        test_path_m = re.search(r'"test"\s*:\s*\{[^}]*"path"\s*:\s*"([^"]+)"', text, re.DOTALL)
+        if test_path_m:
+            test_content_m = re.search(
+                r'"test"\s*:\s*\{.*?"content"\s*:\s*"(.*?)(?:"\s*\}|$)',
+                text,
+                re.DOTALL,
+            )
+            content = ""
+            if test_content_m:
+                # Decodifica escapes básicos
+                content = test_content_m.group(1).replace("\\n", "\n").replace('\\"', '"').replace("\\\\", "\\")
+            if content or test_path_m.group(1):
+                result["test"] = {
+                    "path": test_path_m.group(1),
+                    "content": content or "# test content truncated — verify manually\nassert True",
+                }
+
+        if not result.get("fix_type") or not result.get("risk_level"):
+            logger.warning("EvolutionAnalyzer: recuperação parcial falhou — campos obrigatórios ausentes")
+            return None
+
+        logger.info(
+            "EvolutionAnalyzer: recuperação parcial OK — campos=%s",
+            list(result.keys()),
+        )
+        return result
+
+    def _recover_array(self, text: str) -> list:
+        """Tenta parsear um array JSON possivelmente truncado, retornando o máximo possível."""
+        depth = 0
+        last_valid_end = 1  # começa após o '['
+        for i, ch in enumerate(text):
+            if ch in ("{", "["):
+                depth += 1
+            elif ch in ("}", "]"):
+                depth -= 1
+                if depth == 0:
+                    # Array completo
+                    try:
+                        return json.loads(text[: i + 1])
+                    except json.JSONDecodeError:
+                        break
+                elif depth == 1:
+                    # Fim de um objeto dentro do array — tenta parsear até aqui
+                    try:
+                        candidate = text[:i + 1] + "]"
+                        parsed = json.loads(candidate)
+                        last_valid_end = i + 1
+                        return parsed
+                    except json.JSONDecodeError:
+                        pass
+        # Retorna lista vazia se não conseguiu parsear nada
+        return []

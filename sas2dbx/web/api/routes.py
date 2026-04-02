@@ -540,6 +540,7 @@ async def get_healing_status(
         strategy=healing.get("strategy", "none"),
         description=healing.get("description", ""),
         error=healing.get("error"),
+        evolution=healing.get("evolution"),
     )
 
 

@@ -168,3 +168,4 @@ class HealStatusResponse(BaseModel):
     strategy: str = "none"
     description: str = ""
     error: str | None = None
+    evolution: dict | None = None  # Sprint 10: resultado do EvolutionEngine quando healing falha
