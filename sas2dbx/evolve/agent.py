@@ -180,16 +180,17 @@ OPÇÕES DE FIX (em ordem de preferência — escolha o de menor risco)
    Ex: nova função SAS→PySpark, nova regra de dialeto SQL
 
 2. ERROR PATTERN (risk=low):
-   Adicionar pattern em sas2dbx/validate/heal/patterns.py
-   Ex: novo regex + categoria + fix determinístico
+   Arquivos PERMITIDOS: sas2dbx/validate/heal/patterns.py e/ou sas2dbx/validate/heal/fixer.py
+   PROIBIDO para risk=low: engine.py, pipeline.py, retest.py, advisor.py, diagnostics.py
+   Ex: novo regex + categoria + fix determinístico em patterns.py; novo handler em fixer.py
 
 3. PROMPT REFINEMENT (risk=medium):
-   Alterar sas2dbx/transpile/llm/prompts.py
+   Arquivos PERMITIDOS: sas2dbx/transpile/llm/prompts.py e/ou sas2dbx/document/prompts.py
    Ex: adicionar regra ao prompt de transpilação
 
 4. ENGINE RULE (risk=high — vai para quarentena, não é auto-aplicado):
-   Alterar sas2dbx/transpile/engine.py ou sas2dbx/transpile/llm/context.py
-   Ex: nova regra Tier 1, ajuste no context builder
+   Arquivos: qualquer módulo em sas2dbx/ — SEMPRE vai para quarentena, revisão humana obrigatória
+   Ex: nova regra Tier 1, ajuste no context builder, alteração em engine.py
 
 ═══════════════════════════════════════════════════════════════
 RESPOSTA OBRIGATÓRIA (JSON válido, sem markdown)
@@ -226,6 +227,8 @@ REGRAS:
 - "old_string" só é necessário quando action="modify"
 - Máximo 3 arquivos em "files_to_modify"
 - Prefira fix_type de menor risco que resolva o problema
+- NUNCA use engine.py, pipeline.py, retest.py, advisor.py em fix_type=error_pattern — use apenas patterns.py e fixer.py
+- Se o fix requer engine.py ou pipeline.py, declare fix_type=engine_rule (risk=high) explicitamente
 """
 
 

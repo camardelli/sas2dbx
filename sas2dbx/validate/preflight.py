@@ -230,6 +230,15 @@ class PreflightChecker:
             )
             return []
 
+        # Extrai nomes de colunas do notebook para criar schema rico na placeholder.
+        # Evita UNRESOLVED_COLUMN imediatamente após o CREATE TABLE com schema mínimo.
+        col_names = self._extract_column_names_from_notebook(content)
+        if col_names:
+            col_defs = ", ".join(f"`{c}` STRING" for c in col_names)
+            ddl_columns = f"id BIGINT, {col_defs}"
+        else:
+            ddl_columns = "id BIGINT, _placeholder BOOLEAN"
+
         lines: list[str] = []
         lines.append("# [PREFLIGHT-BOOTSTRAP] Placeholders criados antes do deploy (preflight)\n")
         injected: list[str] = []
@@ -242,7 +251,7 @@ class PreflightChecker:
                 )
             lines.append(
                 f'spark.sql("CREATE TABLE IF NOT EXISTS {ghost.table_name} '
-                f'(id BIGINT, _placeholder BOOLEAN) USING DELTA")\n'
+                f'({ddl_columns}) USING DELTA")\n'
             )
             injected.append(ghost.table_name)
 
@@ -281,6 +290,35 @@ class PreflightChecker:
             return []
 
         return injected
+
+    def _extract_column_names_from_notebook(self, content: str) -> list[str]:
+        """Extrai nomes de colunas referenciadas no notebook para schema rico do placeholder.
+
+        Reutiliza os mesmos padrões do NotebookFixer._extract_column_names() para garantir
+        que a placeholder tenha as colunas que o notebook vai tentar usar.
+        """
+        _RE_COL_REFS = re.compile(
+            r"""(?:F\.col\(\s*["'](\w+)["']\s*\)|\.col\(\s*["'](\w+)["']\s*\)"""
+            r"""|\bcol\(\s*["'](\w+)["']\s*\)|\[["'](\w+)["']\])""",
+            re.VERBOSE,
+        )
+        _RE_SELECT_ARGS = re.compile(
+            r'\.(?:select|drop|withColumnRenamed|groupBy|orderBy|partitionBy)\s*\(([^)]+)\)'
+        )
+        _SKIP = {
+            "true", "false", "null", "overwrite", "append", "delta",
+            "string", "bigint", "double", "boolean", "date", "timestamp",
+        }
+
+        cols: dict[str, None] = {}
+        for m in _RE_COL_REFS.finditer(content):
+            name = next(g for g in m.groups() if g)
+            cols[name] = None
+        for m in _RE_SELECT_ARGS.finditer(content):
+            for tok in re.findall(r'["\']([\w]+)["\']', m.group(1)):
+                cols[tok] = None
+
+        return [c for c in cols if len(c) > 1 and c.lower() not in _SKIP]
 
     def _suggest_action(self, table_name: str) -> str:
         """Sugere ação para fonte fantasma baseada no nome da tabela."""
