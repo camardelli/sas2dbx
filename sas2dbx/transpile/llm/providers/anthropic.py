@@ -55,16 +55,35 @@ class AnthropicProvider(LLMProvider):
         t0 = time.monotonic()
         try:
             # async with garante que o httpx client fecha antes do event loop encerrar
-            # timeout configurável: connect=10s + read=timeout (para respostas longas com max_tokens alto)
+            # timeout configurável: connect=30s + read=timeout (para respostas longas com max_tokens alto)
+            # max_retries=0: desabilita retry interno do SDK — LLMClient._complete_with_retry()
+            # é o único retry controller (evita cascata de up to 2×3 = 6 tentativas não declaradas)
             import httpx
-            http_timeout = httpx.Timeout(connect=10.0, read=timeout, write=30.0, pool=10.0)
-            async with anthropic.AsyncAnthropic(api_key=self._api_key, timeout=http_timeout) as client:
-                message = await client.messages.create(
-                    model=self._model,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    messages=[{"role": "user", "content": prompt}],
-                )
+            http_timeout = httpx.Timeout(connect=30.0, read=timeout, write=30.0, pool=10.0)
+            async with anthropic.AsyncAnthropic(
+                api_key=self._api_key,
+                timeout=http_timeout,
+                max_retries=0,
+            ) as client:
+                if max_tokens >= 4096:
+                    # Streaming para requests longos: evita que proxies/Cloudflare cortem
+                    # conexões idle enquanto o modelo ainda está gerando a resposta.
+                    # stream.get_final_message() aguarda o fim do stream e retorna o objeto
+                    # messages.Message completo — compatível com o path normal abaixo.
+                    async with client.messages.stream(
+                        model=self._model,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        messages=[{"role": "user", "content": prompt}],
+                    ) as stream:
+                        message = await stream.get_final_message()
+                else:
+                    message = await client.messages.create(
+                        model=self._model,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        messages=[{"role": "user", "content": prompt}],
+                    )
         except anthropic.RateLimitError as exc:
             raise LLMRateLimitError(str(exc), status_code=429) from exc
         except anthropic.APIStatusError as exc:
