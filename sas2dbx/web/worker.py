@@ -289,6 +289,7 @@ class MigrationWorker:
         notebooks = sorted(
             nb for nb in output_dir.glob("*.py")
             if not nb.stem.endswith("_reconciliation")
+            and not nb.stem.lower().startswith("autoexec")
         )
 
         # H1 — Pré-validação estática: corrige padrões conhecidos antes do deploy

@@ -120,4 +120,4 @@ class TestRealFixtures:
         assert "job_001_carga_clientes.sas" in names
         assert "job_002_transform_vendas.sas" in names
         assert "job_003_report_mensal.sas" in names
-        assert "autoexec.sas" in names
+        assert "autoexec.sas" not in names  # autoexec* são excluídos (arquivos de configuração)

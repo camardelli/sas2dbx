@@ -58,6 +58,10 @@ def scan_directory(
         if candidate.name.startswith("._"):
             logger.debug("Scanner: ignorando resource fork macOS %s", candidate.name)
             continue
+        # Ignora arquivos autoexec* — são configuração de ambiente, não jobs executáveis
+        if candidate.stem.lower().startswith("autoexec"):
+            logger.info("Scanner: ignorando arquivo de configuração %s (autoexec)", candidate.name)
+            continue
         if _is_excluded(candidate, root, exclude_patterns):
             logger.debug("Scanner: excluindo %s", candidate)
             continue
