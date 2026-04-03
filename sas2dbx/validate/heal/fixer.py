@@ -93,10 +93,15 @@ class NotebookFixer:
         """
         fix_key = diagnostic.deterministic_fix
         if not fix_key or fix_key not in _HANDLERS:
-            return PatchResult(
-                patched=False,
-                description=f"Sem fix determinístico disponível para '{fix_key or 'None'}'",
-            )
+            # Tenta extrair entidades da mensagem de erro bruta antes de desistir
+            raw_msg = getattr(diagnostic, "raw_error", "") or ""
+            if raw_msg and fix_key == "fix_unresolved_column":
+                logger.debug("Fixer: tentando extrair entidades de raw_error para fix_unresolved_column")
+            else:
+                return PatchResult(
+                    patched=False,
+                    description=f"Sem fix determinístico disponível para '{fix_key or 'None'}'",
+                )
 
         if not notebook_path.exists():
             return PatchResult(
@@ -403,6 +408,21 @@ class NotebookFixer:
         )
         notebook_path.write_text(new_content, encoding="utf-8")
         return f"Adicionado overwriteSchema=true em {len(matches)} write(s)"
+
+    # Regex para extrair coluna ruim e sugestões diretamente da mensagem de erro
+    _RE_BAD_COL_MSG = re.compile(
+        r"with name\s+`?(?P<alias>[\w]+)`?\.`?(?P<col>[\w]+)`?\s+cannot be resolved",
+        re.IGNORECASE,
+    )
+    _RE_SUGGESTIONS_MSG = re.compile(
+        r"Did you mean one of the following\?\s*\[(?P<suggestions>[^\]]+)\]",
+        re.IGNORECASE,
+    )
+    # Extrai itens individuais da lista de sugestões: [`alias`.`col`, ...]
+    _RE_SUGGESTION_ITEM = re.compile(
+        r"`?(?:[\w]+)`?\.`?([\w]+)`?",
+        re.IGNORECASE,
+    )
 
     def _fix_unresolved_column(
         self, notebook_path: Path, entities: dict[str, str]

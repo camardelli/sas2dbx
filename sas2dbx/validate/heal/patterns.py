@@ -31,12 +31,27 @@ ERROR_PATTERNS: dict[str, ErrorPattern] = {
     "column_not_found_with_suggestion": {
         "pattern": re.compile(
             r"UNRESOLVED_COLUMN\.WITH_SUGGESTION"
-            r"|cannot be resolved\. Did you mean one of the following",
+            r"|(?:column|variable|function parameter) with name\s+`?(?P<table_alias>[\w]+)`?\.`?(?P<bad_column>[\w]+)`?\s+cannot be resolved"
+            r"|cannot be resolved\. Did you mean one of the following\?\s*\[(?P<suggestions>[^\]]+)\]",
             re.IGNORECASE,
         ),
         "category": "unresolved_column_suggestion",
         "deterministic_fix": "fix_unresolved_column",
         "severity": "HIGH",
+        "entity_extractors": {
+            "bad_column": re.compile(
+                r"with name\s+`?[\w]*`?\.`?([\w]+)`?\s+cannot be resolved",
+                re.IGNORECASE,
+            ),
+            "table_alias": re.compile(
+                r"with name\s+`?([\w]+)`?\.[`\w]+\s+cannot be resolved",
+                re.IGNORECASE,
+            ),
+            "suggestions": re.compile(
+                r"Did you mean one of the following\?\s*\[([^\]]+)\]",
+                re.IGNORECASE,
+            ),
+        },
     },
     "column_not_found": {
         "pattern": re.compile(
