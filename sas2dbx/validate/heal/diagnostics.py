@@ -195,25 +195,27 @@ class DiagnosticsEngine:
         if cat_match:
             entities["wrong_catalog"] = cat_match.group(1)
 
-        # Coluna não resolvida com sugestão: "with name `coluna_ordem` cannot be resolved.
-        # Did you mean one of the following? [`ano_mes`, `receita_pre`]"
+        # Coluna não resolvida com sugestão.
+        # Databricks emite o formato: with name `alias`.`coluna` cannot be resolved
+        # O regex anterior capturava `alias` (alias) em vez de `coluna`.
+        # Fix: (?:`alias`\.)? opcional antes do nome da coluna — captura sempre o último segmento.
         unresolved_col_match = re.search(
-            r"with name\s+[`'\"]?([\w]+)[`'\"]?\s+cannot be resolved",
+            r"with name\s+(?:`[\w]+`\.)?`([\w]+)`\s+cannot be resolved",
             error_message,
             re.IGNORECASE,
         )
         if unresolved_col_match:
             entities["unresolved_column"] = unresolved_col_match.group(1)
 
+        # Sugestões no formato: [`alias`.`coluna`, `alias2`.`coluna2`, ...]
+        # O regex anterior falhava porque o [^`\]]+ parava no primeiro backtick (antes de coluna).
         suggestion_match = re.search(
-            r"Did you mean one of the following\?\s*\[`?([^`\]]+)`?",
+            r"Did you mean one of the following\?\s*\[(?:`[\w]+`\.)?`([\w]+)`",
             error_message,
             re.IGNORECASE,
         )
         if suggestion_match:
-            # Pega primeira sugestão (mais provável)
-            first_suggestion = suggestion_match.group(1).split("`")[0].strip().rstrip(",")
-            entities["suggested_column"] = first_suggestion
+            entities["suggested_column"] = suggestion_match.group(1)
 
         # Infere catalog/schema do nome da tabela
         if "table_name" in entities:
