@@ -249,14 +249,22 @@ class PreflightChecker:
         lines.append("\n")
         bootstrap_block = "".join(lines)
 
-        # Insere antes do primeiro spark.read.table / spark.sql / df = spark
-        insert_match = re.search(
-            r"(spark\.read\.table\(|spark\.sql\(|df\s*=\s*spark)",
-            content,
-        )
-        if insert_match:
-            pos = insert_match.start()
-            new_content = content[:pos] + bootstrap_block + content[pos:]
+        # Insere antes da primeira linha de código real (não-comentário) que use
+        # spark.read.table / spark.sql / df = spark.
+        # Itera linha por linha para evitar match dentro de comentários Python (#).
+        insert_pos: int | None = None
+        offset = 0
+        # Padrão: qualquer chamada spark. ou df = spark que não seja comentário
+        _CODE_PATTERN = re.compile(r"^\s*spark\.", re.MULTILINE)
+        for line in content.splitlines(keepends=True):
+            stripped = line.lstrip()
+            if not stripped.startswith("#") and _CODE_PATTERN.match(line):
+                insert_pos = offset
+                break
+            offset += len(line)
+
+        if insert_pos is not None:
+            new_content = content[:insert_pos] + bootstrap_block + content[insert_pos:]
         else:
             new_content = bootstrap_block + content
 
