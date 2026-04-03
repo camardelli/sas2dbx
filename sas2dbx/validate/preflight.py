@@ -184,11 +184,29 @@ class PreflightChecker:
         # Tabelas de entrada = lidas mas não escritas
         input_tables = read_tables - write_tables
 
-        # Filtra nomes claramente não-tabela (sem ponto, muito curtos, keywords SQL)
+        # Filtra nomes claramente não-tabela:
+        # 1. Sem ponto ou muito curtos
+        # 2. Keywords SQL
+        # 3. Nomes terminados em '.' (fragmentos como "STAGING." ou "telcostar.operacional.")
+        # 4. Nomes com '<' ou '>' (placeholders de template como "<nome>")
+        # 5. Prefixos de módulos Python conhecidos (pyspark.sql, scipy.stats, etc.)
+        #    — o regex FROM captura 'from pyspark.sql import' como "pyspark.sql"
         _SQL_KEYWORDS = {"dual", "values", "lateral", "unnest"}
+        _PYTHON_MODULE_PREFIXES = {
+            "pyspark", "scipy", "numpy", "pandas", "matplotlib",
+            "sklearn", "tensorflow", "torch", "seaborn", "statsmodels",
+            "importlib", "collections", "functools", "itertools", "os",
+            "sys", "re", "json", "datetime", "pathlib", "typing",
+        }
         return [
             t for t in input_tables
-            if "." in t and len(t) > 3 and t.lower() not in _SQL_KEYWORDS
+            if "." in t
+            and len(t) > 3
+            and not t.endswith(".")
+            and "<" not in t
+            and ">" not in t
+            and t.lower() not in _SQL_KEYWORDS
+            and t.split(".")[0].lower() not in _PYTHON_MODULE_PREFIXES
         ]
 
     def _table_exists(self, client, table_name: str) -> bool:
