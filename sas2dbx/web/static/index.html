@@ -469,11 +469,11 @@
     <div class="form-row">
       <div class="form-group">
         <label>Catalog</label>
-        <input type="text" id="inp-catalog" value="main" placeholder="main" />
+        <input type="text" id="inp-catalog" value="" placeholder="main" />
       </div>
       <div class="form-group">
         <label>Schema</label>
-        <input type="text" id="inp-schema" value="migrated" placeholder="migrated" />
+        <input type="text" id="inp-schema" value="" placeholder="migrated" />
       </div>
       <div class="form-group">
         <label>Encoding</label>
@@ -621,7 +621,17 @@ function route() {
 }
 
 window.addEventListener("hashchange", route);
-window.addEventListener("load", route);
+window.addEventListener("load", () => {
+  // Pré-preenche catalog/schema com os valores configurados no servidor
+  apiFetch("/config/databricks/status")
+    .then(r => r.json())
+    .then(cfg => {
+      if (cfg && cfg.catalog) document.getElementById("inp-catalog").value = cfg.catalog;
+      if (cfg && cfg.schema)  document.getElementById("inp-schema").value  = cfg.schema;
+    })
+    .catch(() => {/* silencia — sem config Databricks ainda */});
+  route();
+});
 
 // ============================================================
 // Utilitários
