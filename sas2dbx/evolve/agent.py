@@ -331,13 +331,19 @@ class EvolutionAnalyzer:
         """Lê o conteúdo atual dos arquivos relevantes para incluir no prompt.
 
         Garante que o LLM veja o conteúdo real e possa propor old_string correto.
-        Limita cada arquivo a 200 linhas para não exceder context window.
+        Limita cada arquivo a 80 linhas para manter o prompt compacto e o JSON de
+        resposta dentro dos limites do max_tokens.
+
+        Para fixer.py (arquivo longo), extrai apenas a seção relevante para a
+        categoria de erro, evitando injetar as primeiras 80 linhas que não contêm
+        o handler correto.
         """
         # Arquivos a incluir por categoria de erro
+        # unresolved_column_suggestion: patterns.py (definição do padrão) +
+        #   seção relevante do fixer.py (_fix_unresolved_column + _fix_placeholder_add_column)
         _FILES_BY_CATEGORY: dict[str, list[str]] = {
             "unresolved_column_suggestion": [
                 "sas2dbx/validate/heal/patterns.py",
-                "sas2dbx/validate/heal/fixer.py",
             ],
             "missing_table": [
                 "sas2dbx/validate/heal/patterns.py",
@@ -345,28 +351,46 @@ class EvolutionAnalyzer:
             ],
             "syntax_error": [
                 "sas2dbx/validate/heal/patterns.py",
-                "sas2dbx/validate/heal/fixer.py",
             ],
             "analysis_exception": [
                 "sas2dbx/validate/heal/patterns.py",
-                "sas2dbx/validate/heal/fixer.py",
             ],
         }
-        # Fallback: sempre inclui patterns.py + fixer.py
+        # Fallback: apenas patterns.py (fixer.py é muito longo para injeção genérica)
         files_to_read = _FILES_BY_CATEGORY.get(error_category, [
             "sas2dbx/validate/heal/patterns.py",
-            "sas2dbx/validate/heal/fixer.py",
         ])
+
+        # Para fixer.py longo: extrair seção relevante por categoria em vez de head
+        _FIXER_ANCHOR: dict[str, str] = {
+            "missing_table": "_fix_missing_table",
+            "unresolved_column_suggestion": "_fix_unresolved_column",
+        }
 
         sections: list[str] = []
         for rel_path in files_to_read:
             abs_path = self._project_root / rel_path
             try:
                 content = abs_path.read_text(encoding="utf-8")
-                # Limita a 200 linhas para não explodir o context window
                 content_lines = content.splitlines()
-                if len(content_lines) > 200:
-                    content = "\n".join(content_lines[:200]) + "\n# ... (truncado em 200 linhas)"
+
+                if rel_path == "sas2dbx/validate/heal/fixer.py":
+                    # Extrai seção relevante para a categoria
+                    anchor = _FIXER_ANCHOR.get(error_category, "")
+                    start_line = 0
+                    if anchor:
+                        for i, line in enumerate(content_lines):
+                            if f"def {anchor}" in line:
+                                start_line = i
+                                break
+                    snippet = content_lines[start_line:start_line + 80]
+                    content = "\n".join(snippet)
+                    if start_line > 0:
+                        content = f"# ... (linha {start_line + 1})\n" + content
+                    content += "\n# ... (truncado)"
+                elif len(content_lines) > 80:
+                    content = "\n".join(content_lines[:80]) + "\n# ... (truncado em 80 linhas)"
+
                 sections.append(f"### {rel_path}\n```python\n{content}\n```")
             except OSError:
                 sections.append(f"### {rel_path}\n(arquivo não encontrado em {abs_path})")
