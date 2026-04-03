@@ -450,36 +450,33 @@ class NotebookFixer:
 
         # Rejeita substituições perigosas: sugestão muito curta (≤3 chars) ou
         # nome genérico que indica falso positivo do "Did you mean" do Databricks.
+        # Sugestão genérica como "id" quase sempre significa que a tabela placeholder
+        # foi criada com schema mínimo — a coluna faltante deve ser ADICIONADA via
+        # ALTER TABLE, não substituída.
         _GENERIC_COLUMNS = {"id", "key", "row", "idx", "num", "val", "col", "name"}
         if len(suggested) <= 3 or suggested.lower() in _GENERIC_COLUMNS:
             logger.warning(
                 "NotebookFixer._fix_unresolved_column: sugestão '%s' rejeitada "
-                "(muito genérica para substituir '%s' com segurança)",
+                "(muito genérica para substituir '%s' com segurança) — tentando ALTER TABLE",
                 suggested,
                 unresolved,
             )
-            return (
-                f"Sugestão '{suggested}' rejeitada — muito genérica para substituir "
-                f"'{unresolved}' automaticamente; requer revisão manual"
-            )
+            return self._fix_placeholder_add_column(notebook_path, unresolved)
 
         # Rejeita quando a sugestão remove semântica de negócio:
         # se o nome original tem prefixo de domínio (cd_, fl_, vl_, nm_, qt_, dt_)
-        # e a sugestão não, é um falso positivo.
+        # e a sugestão não, é um falso positivo. Tenta ALTER TABLE como fallback.
         _DOMAIN_PREFIXES = ("cd_", "fl_", "vl_", "nm_", "qt_", "dt_", "id_", "tp_", "ds_")
         original_has_domain = any(unresolved.lower().startswith(p) for p in _DOMAIN_PREFIXES)
         suggested_has_domain = any(suggested.lower().startswith(p) for p in _DOMAIN_PREFIXES)
         if original_has_domain and not suggested_has_domain:
             logger.warning(
                 "NotebookFixer._fix_unresolved_column: sugestão '%s' rejeitada "
-                "(perde prefixo de domínio de '%s')",
+                "(perde prefixo de domínio de '%s') — tentando ALTER TABLE",
                 suggested,
                 unresolved,
             )
-            return (
-                f"Sugestão '{suggested}' rejeitada — remove prefixo de domínio de "
-                f"'{unresolved}'; requer revisão manual"
-            )
+            return self._fix_placeholder_add_column(notebook_path, unresolved)
 
         content = notebook_path.read_text(encoding="utf-8")
 
