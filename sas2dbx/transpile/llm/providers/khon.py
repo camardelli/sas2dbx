@@ -44,6 +44,7 @@ class KhonGatewayProvider(LLMProvider):
         prompt: str,
         max_tokens: int,
         temperature: float,
+        timeout: float = 120.0,
     ) -> LLMResponse:
         """Chama o gateway Khon e retorna LLMResponse.
 
@@ -75,7 +76,7 @@ class KhonGatewayProvider(LLMProvider):
             # NOTE: urllib.request.urlopen é síncrono/bloqueante dentro de async def.
             # Para o MVP sequencial isso é aceitável; em uso concorrente bloqueia o
             # event loop. Substituir por aiohttp/httpx quando necessário.
-            with urllib.request.urlopen(req, timeout=120) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 body = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             status = exc.code

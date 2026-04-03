@@ -48,6 +48,7 @@ class LLMConfig:
     temperature: float = 0.0
     retry_attempts: int = 3
     retry_base_delay: float = 1.0
+    timeout: float = 120.0  # timeout total por chamada em segundos
 
 
 @dataclass
@@ -81,6 +82,7 @@ class LLMProvider(ABC):
         prompt: str,
         max_tokens: int,
         temperature: float,
+        timeout: float = 120.0,
     ) -> LLMResponse:
         """Envia prompt e retorna resposta.
 
@@ -171,7 +173,7 @@ class LLMClient:
     async def _complete_with_retry(
         self, provider: LLMProvider, prompt: str
     ) -> LLMResponse:
-        """Executa chamada ao provider com exponential backoff em rate limit."""
+        """Executa chamada ao provider com exponential backoff em rate limit e gateway errors."""
         last_exc: Exception | None = None
         for attempt in range(1, self._config.retry_attempts + 1):
             try:
@@ -179,6 +181,7 @@ class LLMClient:
                     prompt=prompt,
                     max_tokens=self._config.max_tokens,
                     temperature=self._config.temperature,
+                    timeout=self._config.timeout,
                 )
             except LLMRateLimitError as exc:
                 last_exc = exc
@@ -190,8 +193,19 @@ class LLMClient:
                     delay,
                 )
                 await asyncio.sleep(delay)
-            except LLMGatewayError:
-                raise  # propaga para acionar fallback em complete()
+            except LLMGatewayError as exc:
+                last_exc = exc
+                if attempt == self._config.retry_attempts:
+                    raise  # esgotou tentativas → propaga para acionar fallback
+                delay = self._config.retry_base_delay * (2 ** (attempt - 1))
+                logger.warning(
+                    "LLMClient: gateway/conexão error (attempt %d/%d) — aguardando %.1fs: %s",
+                    attempt,
+                    self._config.retry_attempts,
+                    delay,
+                    exc,
+                )
+                await asyncio.sleep(delay)
         raise LLMProviderError(
             f"Todas as {self._config.retry_attempts} tentativas falharam"
         ) from last_exc

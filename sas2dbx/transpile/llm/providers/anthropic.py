@@ -36,6 +36,7 @@ class AnthropicProvider(LLMProvider):
         prompt: str,
         max_tokens: int,
         temperature: float,
+        timeout: float = 120.0,
     ) -> LLMResponse:
         """Chama a API Anthropic e retorna LLMResponse.
 
@@ -54,8 +55,10 @@ class AnthropicProvider(LLMProvider):
         t0 = time.monotonic()
         try:
             # async with garante que o httpx client fecha antes do event loop encerrar
-            # timeout=60s evita hang indefinido em falhas de rede
-            async with anthropic.AsyncAnthropic(api_key=self._api_key, timeout=60.0) as client:
+            # timeout configurável: connect=10s + read=timeout (para respostas longas com max_tokens alto)
+            import httpx
+            http_timeout = httpx.Timeout(connect=10.0, read=timeout, write=30.0, pool=10.0)
+            async with anthropic.AsyncAnthropic(api_key=self._api_key, timeout=http_timeout) as client:
                 message = await client.messages.create(
                     model=self._model,
                     max_tokens=max_tokens,

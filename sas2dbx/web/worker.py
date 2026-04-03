@@ -556,8 +556,9 @@ class MigrationWorker:
         from sas2dbx.transpile.llm.client import LLMClient
         import dataclasses
 
-        # Evolução precisa de mais tokens — resposta inclui código de teste completo
-        evolution_config = dataclasses.replace(self._llm_config, max_tokens=8192)
+        # Evolução precisa de mais tokens e mais tempo — resposta inclui código de teste completo
+        # timeout=180s: 8192 tokens de output pode levar 90-120s em Claude Sonnet
+        evolution_config = dataclasses.replace(self._llm_config, max_tokens=8192, timeout=180.0)
         llm = LLMClient(evolution_config)
         project_root = Path(__file__).resolve().parents[2]
         health_path = self._storage.work_dir / "catalog" / "health_snapshots.json"

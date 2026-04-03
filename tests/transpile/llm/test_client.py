@@ -40,7 +40,7 @@ class _FakeProvider(LLMProvider):
     def is_available(self) -> bool:
         return True
 
-    async def complete(self, prompt: str, max_tokens: int, temperature: float) -> LLMResponse:
+    async def complete(self, prompt: str, max_tokens: int, temperature: float, timeout: float = 120.0) -> LLMResponse:
         self._calls += 1
         result = self._responses[min(self._calls - 1, len(self._responses) - 1)]
         if isinstance(result, Exception):
@@ -88,6 +88,8 @@ class TestAnthropicProvider:
         mock_message.usage.output_tokens = 30
 
         with patch("anthropic.AsyncAnthropic") as MockClient:
+            MockClient.return_value.__aenter__ = AsyncMock(return_value=MockClient.return_value)
+            MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
             MockClient.return_value.messages.create = AsyncMock(return_value=mock_message)
             provider = AnthropicProvider(api_key="test-key", model="claude-sonnet-4-6")
             resp = _run(provider.complete("prompt", max_tokens=100, temperature=0.0))
@@ -102,6 +104,8 @@ class TestAnthropicProvider:
         from sas2dbx.transpile.llm.providers.anthropic import AnthropicProvider
 
         with patch("anthropic.AsyncAnthropic") as MockClient:
+            MockClient.return_value.__aenter__ = AsyncMock(return_value=MockClient.return_value)
+            MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
             MockClient.return_value.messages.create = AsyncMock(
                 side_effect=sdk.RateLimitError(
                     message="rate limit",
@@ -119,6 +123,8 @@ class TestAnthropicProvider:
         from sas2dbx.transpile.llm.providers.anthropic import AnthropicProvider
 
         with patch("anthropic.AsyncAnthropic") as MockClient:
+            MockClient.return_value.__aenter__ = AsyncMock(return_value=MockClient.return_value)
+            MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
             err = sdk.APIStatusError(
                 message="server error",
                 response=MagicMock(status_code=500),
