@@ -72,20 +72,23 @@ class EvolutionEngine:
         health_monitor: HealthMonitor,
         unresolved_dir: Path | None = None,
         test_timeout: int = 120,
+        catalog_dir: Path | None = None,
     ) -> None:
+        # catalog_dir: onde quarantine.json e evolution_history.json são persistidos.
+        # Separa dados persistentes do project_root para suportar ambientes Docker
+        # onde project_root aponta para o código-fonte e o volume montado é outro path.
+        _catalog = catalog_dir or (project_root / "sas2dbx_work" / "catalog")
         self._analyzer = EvolutionAnalyzer(llm_client, project_root)
         self._gate = QualityGate(project_root, test_timeout)
         self._applier = FixApplier(
             project_root,
-            history_path=project_root / "sas2dbx_work" / "catalog" / "evolution_history.json",
+            history_path=_catalog / "evolution_history.json",
         )
         self._quarantine = QuarantineStore(
-            project_root / "sas2dbx_work" / "catalog" / "quarantine.json"
+            _catalog / "quarantine.json"
         )
         self._health = health_monitor
-        self._unresolved_dir = unresolved_dir or (
-            project_root / "sas2dbx_work" / "catalog" / "unresolved"
-        )
+        self._unresolved_dir = unresolved_dir or (_catalog / "unresolved")
 
     def process(self, error: UnresolvedError) -> EvolutionResult:
         """Processa um UnresolvedError — análise → gate → apply.

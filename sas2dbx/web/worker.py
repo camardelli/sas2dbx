@@ -568,6 +568,7 @@ class MigrationWorker:
             project_root=project_root,
             health_monitor=health,
             unresolved_dir=self._storage.work_dir / "catalog" / "unresolved",
+            catalog_dir=self._storage.work_dir / "catalog",
         )
         return self._evolution_engine
 

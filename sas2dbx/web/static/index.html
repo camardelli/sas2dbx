@@ -1299,13 +1299,14 @@ async function _fetchQuarantine() {
     for (const q of items) {
       const div = document.createElement("div");
       div.className = "qentry";
+      const ps = q.proposal_summary || {};
       div.innerHTML = `
-        <div class="qentry-title">${encodeHTML(q.job_id || "?")} — ${encodeHTML(q.fix_type || "?")} (risk=${encodeHTML(q.risk_level || "?")})</div>
-        <div class="qentry-meta">ID: ${encodeHTML(q.id || "?")} · ${encodeHTML(q.submitted_at || "")}</div>
-        <div class="qentry-desc">${encodeHTML(q.description || "")}</div>
+        <div class="qentry-title">${encodeHTML(q.job_id || "?")} — ${encodeHTML(ps.fix_type || "?")} (risk=${encodeHTML(ps.risk_level || "?")})</div>
+        <div class="qentry-meta">ID: ${encodeHTML(q.entry_id || "?")} · ${encodeHTML(q.created_at || "")}</div>
+        <div class="qentry-desc">${encodeHTML(ps.description || "")}</div>
         <div class="qentry-actions">
-          <button class="qbtn-approve" onclick="_quarantineAction('${encodeHTML(q.id)}','approve')">✓ Aprovar</button>
-          <button class="qbtn-reject"  onclick="_quarantineAction('${encodeHTML(q.id)}','reject')">✗ Rejeitar</button>
+          <button class="qbtn-approve" onclick="_quarantineAction('${encodeHTML(q.entry_id)}','approve')">✓ Aprovar</button>
+          <button class="qbtn-reject"  onclick="_quarantineAction('${encodeHTML(q.entry_id)}','reject')">✗ Rejeitar</button>
         </div>`;
       _qPanel.body.appendChild(div);
     }
