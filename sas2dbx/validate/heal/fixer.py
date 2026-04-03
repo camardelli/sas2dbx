@@ -611,10 +611,20 @@ class NotebookFixer:
             insert_pos = end_of_line + 1
             content = content[:insert_pos] + alter_block + content[insert_pos:]
         else:
-            # Insere antes do primeiro spark.read.table para garantir que a coluna
-            # existe antes de qualquer leitura
-            first_read = re.search(r'spark\.read\.table\(', content)
-            insert_pos = first_read.start() if first_read else 0
+            # Insere antes do primeiro spark.read.table em linha NÃO comentada
+            # para garantir que a coluna existe antes de qualquer leitura.
+            # Importante: ignora matches dentro de linhas de comentário (#)
+            # para não quebrar a linha e expor fragmentos como código executável.
+            insert_pos = None
+            for m in re.finditer(r'spark\.read\.table\(', content):
+                # Verifica se a linha do match começa com # (comentário)
+                line_start = content.rfind("\n", 0, m.start()) + 1
+                line_text = content[line_start:m.start()]
+                if not line_text.lstrip().startswith("#"):
+                    insert_pos = m.start()
+                    break
+            if insert_pos is None:
+                insert_pos = 0
             content = content[:insert_pos] + alter_block + content[insert_pos:]
 
         notebook_path.write_text(content, encoding="utf-8")
