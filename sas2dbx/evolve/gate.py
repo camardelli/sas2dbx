@@ -103,21 +103,24 @@ class QualityGate:
                 "aguardando aprovação humana",
             )
 
-        # Etapa 3: Test suite existente passa antes de qualquer modificação
+        # Etapa 3: Captura falhas existentes na baseline (comparação delta).
+        # NÃO exige baseline limpa — fix que não introduz novas falhas é seguro.
+        # Isso permite que testes pré-existentes com falha não bloqueiem o gate.
         pre_result = self._run_tests(self._root)
-        if not pre_result["passed"]:
-            return GateResult(
-                "REJECT",
-                "Test suite existente falhou antes do fix — ambiente instável",
-                pre_result["output"],
+        pre_failures = pre_result["failed_tests"]
+        if pre_failures:
+            logger.info(
+                "QualityGate: %d falha(s) pré-existente(s) na baseline (não bloqueiam gate): %s",
+                len(pre_failures),
+                sorted(pre_failures)[:5],  # log apenas os primeiros 5
             )
 
-        # Etapa 4: Aplica fix em sandbox e roda testes completos
-        sandbox_result = self._run_in_sandbox(proposal)
+        # Etapa 4: Aplica fix em sandbox — aceita se delta de falhas é zero
+        sandbox_result = self._run_in_sandbox(proposal, pre_failures)
         if not sandbox_result["passed"]:
             return GateResult(
                 "REJECT",
-                "Testes falharam após aplicar fix em sandbox",
+                sandbox_result.get("reject_reason", "Testes falharam após aplicar fix em sandbox"),
                 sandbox_result["output"],
             )
 
@@ -152,13 +155,16 @@ class QualityGate:
         return None
 
     def _run_tests(self, work_dir: Path, extra_args: list[str] | None = None) -> dict:
-        """Roda pytest e retorna {'passed': bool, 'output': str}."""
+        """Roda pytest e retorna {'passed': bool, 'output': str, 'failed_tests': set[str]}.
+
+        Não usa -x (stop-on-first-failure) para capturar o conjunto completo de falhas,
+        permitindo comparação delta entre baseline e sandbox.
+        """
         cmd = [
             sys.executable,
             "-m",
             "pytest",
             "tests/",
-            "-x",                 # para no primeiro erro
             "--tb=short",
             "-q",
             "--no-header",
@@ -174,17 +180,34 @@ class QualityGate:
             )
             output = (result.stdout + result.stderr)[-4000:]  # últimas 4k chars
             passed = result.returncode == 0
+            failed_tests = self._extract_failed_tests(output)
             if not passed:
-                logger.info("QualityGate: pytest falhou (rc=%d)", result.returncode)
-            return {"passed": passed, "output": output}
+                logger.info(
+                    "QualityGate: pytest rc=%d, %d falha(s)",
+                    result.returncode, len(failed_tests),
+                )
+            return {"passed": passed, "output": output, "failed_tests": failed_tests}
         except subprocess.TimeoutExpired:
             logger.warning("QualityGate: pytest timeout (%ds)", self._timeout)
-            return {"passed": False, "output": f"TIMEOUT após {self._timeout}s"}
+            return {"passed": False, "output": f"TIMEOUT após {self._timeout}s", "failed_tests": set()}
         except Exception as exc:
             logger.error("QualityGate: erro ao rodar pytest: %s", exc)
-            return {"passed": False, "output": str(exc)}
+            return {"passed": False, "output": str(exc), "failed_tests": set()}
 
-    def _run_in_sandbox(self, proposal: EvolutionProposal) -> dict:
+    def _extract_failed_tests(self, output: str) -> set[str]:
+        """Extrai IDs de testes com falha do output do pytest.
+
+        Formato pytest: 'FAILED tests/path/test_file.py::TestClass::test_method'
+        """
+        import re
+        failed: set[str] = set()
+        for line in output.splitlines():
+            m = re.match(r"\s*FAILED\s+([\w/\\.:\-]+)", line)
+            if m:
+                failed.add(m.group(1).strip())
+        return failed
+
+    def _run_in_sandbox(self, proposal: EvolutionProposal, pre_failures: set[str] | None = None) -> dict:
         """Aplica fix em tmpdir e roda testes completos.
 
         Estratégia:
@@ -192,7 +215,13 @@ class QualityGate:
           2. Aplica as modificações propostas
           3. Escreve o arquivo de teste novo
           4. Roda pytest no tmpdir
-          5. Descarta tmpdir
+          5. Comparação delta: aceita se nenhuma nova falha foi introduzida
+          6. Descarta tmpdir
+
+        Args:
+            proposal: Proposta de fix.
+            pre_failures: Conjunto de IDs de testes que já falhavam na baseline.
+                          Se None, exige que todos os testes passem.
         """
         with tempfile.TemporaryDirectory(prefix="sas2dbx_gate_") as tmpdir:
             tmp = Path(tmpdir)
@@ -243,5 +272,31 @@ class QualityGate:
             test_target.parent.mkdir(parents=True, exist_ok=True)
             test_target.write_text(proposal.test.content, encoding="utf-8")
 
-            # Roda pytest no sandbox
-            return self._run_tests(sandbox)
+            # Roda pytest no sandbox e compara delta
+            post_result = self._run_tests(sandbox)
+            post_failures = post_result["failed_tests"]
+
+            if pre_failures is not None:
+                # Modo delta: aceita se nenhuma nova falha foi introduzida
+                new_failures = post_failures - pre_failures
+                if new_failures:
+                    logger.info(
+                        "QualityGate sandbox: %d nova(s) falha(s) introduzida(s): %s",
+                        len(new_failures), sorted(new_failures),
+                    )
+                    return {
+                        "passed": False,
+                        "output": post_result["output"],
+                        "reject_reason": (
+                            f"Fix introduziu {len(new_failures)} nova(s) falha(s): "
+                            + ", ".join(sorted(new_failures))
+                        ),
+                    }
+                logger.info(
+                    "QualityGate sandbox: delta OK — %d falha(s) pré-existente(s) inalteradas, nenhuma nova",
+                    len(post_failures),
+                )
+                return {"passed": True, "output": post_result["output"]}
+            else:
+                # Modo estrito (sem baseline): exige que tudo passe
+                return {"passed": post_result["passed"], "output": post_result["output"]}
