@@ -199,6 +199,81 @@ class PreflightChecker:
         except Exception:  # noqa: BLE001
             return False
 
+    def inject_placeholder_bootstrap(
+        self, notebook_path: Path, ghosts: list[GhostSource]
+    ) -> list[str]:
+        """Injeta bloco CREATE TABLE IF NOT EXISTS para todas as fontes fantasma.
+
+        Inserido ANTES do primeiro spark.read.table() ou spark.sql() no notebook.
+        Evita o ciclo deploy→falha→heal(1 tabela)→repeat que esgota o cap de iterações.
+
+        Args:
+            notebook_path: Notebook .py a modificar.
+            ghosts: Lista de GhostSource referenciadas neste notebook.
+
+        Returns:
+            Lista de nomes de tabela para as quais o placeholder foi injetado.
+        """
+        if not ghosts:
+            return []
+
+        try:
+            content = notebook_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            logger.warning("PreflightChecker: erro ao ler %s: %s", notebook_path.name, exc)
+            return []
+
+        # Não re-injeta se já existe bloco de bootstrap (idempotente)
+        if "# [PREFLIGHT-BOOTSTRAP]" in content:
+            logger.debug(
+                "PreflightChecker: bootstrap já presente em %s — ignorando", notebook_path.name
+            )
+            return []
+
+        lines: list[str] = []
+        lines.append("# [PREFLIGHT-BOOTSTRAP] Placeholders criados antes do deploy (preflight)\n")
+        injected: list[str] = []
+        for ghost in ghosts:
+            parts = ghost.table_name.split(".")
+            if len(parts) == 3:
+                catalog, schema, _ = parts
+                lines.append(
+                    f'spark.sql("CREATE SCHEMA IF NOT EXISTS {catalog}.{schema}")\n'
+                )
+            lines.append(
+                f'spark.sql("CREATE TABLE IF NOT EXISTS {ghost.table_name} '
+                f'(id BIGINT, _placeholder BOOLEAN) USING DELTA")\n'
+            )
+            injected.append(ghost.table_name)
+
+        lines.append("\n")
+        bootstrap_block = "".join(lines)
+
+        # Insere antes do primeiro spark.read.table / spark.sql / df = spark
+        insert_match = re.search(
+            r"(spark\.read\.table\(|spark\.sql\(|df\s*=\s*spark)",
+            content,
+        )
+        if insert_match:
+            pos = insert_match.start()
+            new_content = content[:pos] + bootstrap_block + content[pos:]
+        else:
+            new_content = bootstrap_block + content
+
+        try:
+            notebook_path.write_text(new_content, encoding="utf-8")
+            logger.info(
+                "PreflightChecker: bootstrap injetado em %s — %d placeholder(s): %s",
+                notebook_path.name,
+                len(injected),
+                ", ".join(injected),
+            )
+        except OSError as exc:
+            logger.warning("PreflightChecker: falha ao gravar bootstrap em %s: %s", notebook_path.name, exc)
+            return []
+
+        return injected
+
     def _suggest_action(self, table_name: str) -> str:
         """Sugere ação para fonte fantasma baseada no nome da tabela."""
         parts = table_name.split(".")

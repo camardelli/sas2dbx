@@ -359,6 +359,32 @@ class MigrationWorker:
                         notebook=ghost.notebooks[0] if ghost.notebooks else "",
                     )
 
+                # GAP-B2: injeta CREATE TABLE IF NOT EXISTS para TODOS os ghosts
+                # detectados, por notebook, antes do loop de deploy.
+                # Elimina o ciclo deploy→falha→heal(1 por vez) que esgota o cap=2
+                # quando há múltiplas tabelas faltando (ex: scored_ta + ds_agg + ...).
+                if preflight_report.has_ghosts:
+                    total_bootstrapped = 0
+                    for nb in notebooks:
+                        relevant = [
+                            g for g in preflight_report.ghost_sources
+                            if nb.stem in g.notebooks
+                        ]
+                        if relevant:
+                            created = preflight.inject_placeholder_bootstrap(nb, relevant)
+                            total_bootstrapped += len(created)
+                    if total_bootstrapped:
+                        logger.info(
+                            "MigrationWorker[validate %s]: preflight-bootstrap — "
+                            "%d placeholder(s) injetados nos notebooks antes do deploy",
+                            migration_id, total_bootstrapped,
+                        )
+                        meta = self._storage.get_meta(migration_id)
+                        meta.setdefault("validation", {}).setdefault("preflight", {})[
+                            "bootstrap_injected"
+                        ] = total_bootstrapped
+                        self._storage.save_meta(migration_id, meta)
+
             for idx, nb in enumerate(notebooks):
                 # Verifica cancelamento antes de cada notebook (evita deploys desnecessários)
                 if self._is_cancelled(migration_id):

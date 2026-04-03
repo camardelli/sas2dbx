@@ -134,8 +134,9 @@ class TestRetestEngineRetest:
         engine._config = cfg
         engine._deployer = MagicMock()
         engine._executor = MagicMock()
-        # cluster_id não existe em DatabricksConfig — verificação estática
-        assert not hasattr(cfg, "cluster_id")
+        # RetestEngine não acessa cluster_id — verifica que o engine não usa esse campo
+        # (cluster_id existe em DatabricksConfig mas é opcional/None por padrão)
+        assert getattr(cfg, "cluster_id", None) is None
 
     def test_import_error_without_sdk(self) -> None:
         with patch.dict("sys.modules", {"databricks": None, "databricks.sdk": None}):
