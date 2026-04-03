@@ -195,14 +195,16 @@ class QualityGate:
             return {"passed": False, "output": str(exc), "failed_tests": set()}
 
     def _extract_failed_tests(self, output: str) -> set[str]:
-        """Extrai IDs de testes com falha do output do pytest.
+        """Extrai IDs de testes com falha ou erro do output do pytest.
 
-        Formato pytest: 'FAILED tests/path/test_file.py::TestClass::test_method'
+        Captura:
+          FAILED tests/path/test_file.py::TestClass::test_method
+          ERROR  tests/path/test_file.py::TestClass::test_method
         """
         import re
         failed: set[str] = set()
         for line in output.splitlines():
-            m = re.match(r"\s*FAILED\s+([\w/\\.:\-]+)", line)
+            m = re.match(r"\s*(?:FAILED|ERROR)\s+([\w/\\.:\-]+)", line)
             if m:
                 failed.add(m.group(1).strip())
         return failed
@@ -257,12 +259,14 @@ class QualityGate:
                                 "QualityGate sandbox: old_string não encontrado em %s — abortando sandbox",
                                 fm.path,
                             )
+                            msg = (
+                                f"old_string não encontrado em '{fm.path}' — "
+                                "fix não aplicado (LLM propôs trecho que não existe no arquivo atual)"
+                            )
                             return {
                                 "passed": False,
-                                "output": (
-                                    f"old_string não encontrado em '{fm.path}' — "
-                                    "fix não aplicado (modificação abortada)"
-                                ),
+                                "output": msg,
+                                "reject_reason": msg,
                             }
                     else:
                         target.write_text(fm.content, encoding="utf-8")

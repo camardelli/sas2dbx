@@ -172,6 +172,11 @@ CÓDIGO PYSPARK GERADO (que falhou — últimas 80 linhas)
 {pyspark_snippet}
 
 ═══════════════════════════════════════════════════════════════
+ARQUIVOS RELEVANTES (conteúdo atual — use EXATAMENTE esses trechos em old_string)
+═══════════════════════════════════════════════════════════════
+{file_contents}
+
+═══════════════════════════════════════════════════════════════
 OPÇÕES DE FIX (em ordem de preferência — escolha o de menor risco)
 ═══════════════════════════════════════════════════════════════
 1. KNOWLEDGE STORE (risk=low):
@@ -304,6 +309,11 @@ class EvolutionAnalyzer:
         # Safe job_id para nome de arquivo de teste
         job_id_safe = re.sub(r"[^a-zA-Z0-9_]", "_", error.job_id)[:40]
 
+        # Injeta conteúdo real dos arquivos relevantes para o LLM ver o que vai modificar.
+        # Sem isso, o LLM propõe old_string baseado em conhecimento de treinamento
+        # e não no conteúdo atual do arquivo — causando "old_string não encontrado".
+        file_contents = self._read_relevant_files(error.error_category)
+
         return _PROMPT_TEMPLATE.format(
             num_attempts=len(error.healing_attempts),
             job_id=error.job_id,
@@ -314,7 +324,54 @@ class EvolutionAnalyzer:
             healing_attempts_text=attempts_text,
             sas_original=error.sas_original[:3000],
             pyspark_snippet=pyspark_snippet,
+            file_contents=file_contents,
         )
+
+    def _read_relevant_files(self, error_category: str) -> str:
+        """Lê o conteúdo atual dos arquivos relevantes para incluir no prompt.
+
+        Garante que o LLM veja o conteúdo real e possa propor old_string correto.
+        Limita cada arquivo a 200 linhas para não exceder context window.
+        """
+        # Arquivos a incluir por categoria de erro
+        _FILES_BY_CATEGORY: dict[str, list[str]] = {
+            "unresolved_column_suggestion": [
+                "sas2dbx/validate/heal/patterns.py",
+                "sas2dbx/validate/heal/fixer.py",
+            ],
+            "missing_table": [
+                "sas2dbx/validate/heal/patterns.py",
+                "sas2dbx/validate/heal/fixer.py",
+            ],
+            "syntax_error": [
+                "sas2dbx/validate/heal/patterns.py",
+                "sas2dbx/validate/heal/fixer.py",
+            ],
+            "analysis_exception": [
+                "sas2dbx/validate/heal/patterns.py",
+                "sas2dbx/validate/heal/fixer.py",
+            ],
+        }
+        # Fallback: sempre inclui patterns.py + fixer.py
+        files_to_read = _FILES_BY_CATEGORY.get(error_category, [
+            "sas2dbx/validate/heal/patterns.py",
+            "sas2dbx/validate/heal/fixer.py",
+        ])
+
+        sections: list[str] = []
+        for rel_path in files_to_read:
+            abs_path = self._project_root / rel_path
+            try:
+                content = abs_path.read_text(encoding="utf-8")
+                # Limita a 200 linhas para não explodir o context window
+                content_lines = content.splitlines()
+                if len(content_lines) > 200:
+                    content = "\n".join(content_lines[:200]) + "\n# ... (truncado em 200 linhas)"
+                sections.append(f"### {rel_path}\n```python\n{content}\n```")
+            except OSError:
+                sections.append(f"### {rel_path}\n(arquivo não encontrado em {abs_path})")
+
+        return "\n\n".join(sections) if sections else "(nenhum arquivo relevante encontrado)"
 
     def _parse_proposal(self, raw: str, error: UnresolvedError) -> EvolutionProposal | None:
         """Parseia JSON da resposta do LLM em EvolutionProposal."""
