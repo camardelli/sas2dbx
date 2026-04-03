@@ -518,9 +518,14 @@ class NotebookFixer:
         # anterior (IF NOT EXISTS faz o CREATE TABLE não aparecer no notebook novo).
         # Nesse caso, varre os spark.read.table() para descobrir quais tabelas
         # são candidatas e emite ALTER TABLE para todas.
+        # Inclui f-strings resolvendo variáveis simples do notebook.
         if not tables:
             read_pattern = re.compile(
                 r'spark\.read\.table\(["\']([^"\']+)["\']\)',
+                re.IGNORECASE,
+            )
+            fstring_pattern = re.compile(
+                r'spark\.read\.table\(f["\']([^"\']+)["\']\)',
                 re.IGNORECASE,
             )
             # Filtra nomes de tabela inválidos (LLM placeholders) antes de emitir ALTER TABLE.
@@ -530,10 +535,31 @@ class NotebookFixer:
                 "schema_name", "catalog_name", "nome_da_tabela",
             })
             raw_tables = read_pattern.findall(content)
+
+            # Resolve f-strings: extrai padrões {var} e substitui por valores
+            # encontrados no notebook via `var = "valor"` ou `var = 'valor'`.
+            fstring_templates = fstring_pattern.findall(content)
+            for tmpl in fstring_templates:
+                var_names = re.findall(r'\{([\w]+)\}', tmpl)
+                resolved = tmpl
+                for var in var_names:
+                    m = re.search(
+                        rf'\b{re.escape(var)}\s*=\s*["\']([^"\']+)["\']',
+                        content,
+                    )
+                    if m:
+                        resolved = resolved.replace('{' + var + '}', m.group(1))
+                if '{' not in resolved:  # todas as variáveis foram resolvidas
+                    raw_tables.append(resolved)
+                    logger.debug(
+                        "Fixer._fix_placeholder_add_column: f-string resolvida: %s → %s",
+                        tmpl, resolved,
+                    )
+
             tables = []
             for t in dict.fromkeys(raw_tables):  # preserva ordem, deduplica
                 table_simple = t.split(".")[-1].lower()
-                if "<" in t or ">" in t:
+                if "<" in t or ">" in t or "{" in t:
                     logger.debug("Fixer: tabela placeholder inválida ignorada: %s", t)
                     continue
                 if table_simple in _INVALID_TABLE_TOKENS:
