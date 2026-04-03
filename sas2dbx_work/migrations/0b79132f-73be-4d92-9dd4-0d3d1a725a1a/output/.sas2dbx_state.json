@@ -1,0 +1,9 @@
+{
+  "version": "1.0",
+  "started_at": "2026-04-03T02:56:09+00:00",
+  "jobs": {
+    "job_complexo_analise_churn": {
+      "status": "in_progress"
+    }
+  }
+}

@@ -1,0 +1,57 @@
+{
+  "migration_id": "0b79132f-73be-4d92-9dd4-0d3d1a725a1a",
+  "status": "processing",
+  "created_at": "2026-04-03T02:56:08.974+00:00",
+  "config": {
+    "autoexec_filename": "autoexec.sas",
+    "encoding": "auto",
+    "catalog": "telcostar",
+    "schema": "operacional",
+    "original_filename": "telcostar_churn.zip"
+  },
+  "error": null,
+  "pipeline_steps": [
+    {
+      "id": "extract",
+      "label": "Extraindo arquivos ZIP",
+      "status": "done",
+      "detail": ""
+    },
+    {
+      "id": "scan",
+      "label": "Escaneando jobs SAS",
+      "status": "done",
+      "detail": "1 arquivo(s) .sas"
+    },
+    {
+      "id": "analyze",
+      "label": "Analisando dependências",
+      "status": "done",
+      "detail": "1 job(s) · 0 dep(s) implícita(s)"
+    },
+    {
+      "id": "transpile",
+      "label": "Transpilando para PySpark",
+      "status": "running",
+      "detail": "0 / 1 jobs"
+    },
+    {
+      "id": "document",
+      "label": "Gerando documentação por job",
+      "status": "pending",
+      "detail": ""
+    },
+    {
+      "id": "architecture",
+      "label": "Gerando ARCHITECTURE.md",
+      "status": "pending",
+      "detail": ""
+    },
+    {
+      "id": "explorer",
+      "label": "Gerando explorer interativo",
+      "status": "pending",
+      "detail": ""
+    }
+  ]
+}
