@@ -823,6 +823,12 @@ async function fetchStatus(id) {
       // Botão Retomar: visível quando cancelled ou failed (há chance de retomar)
       const canResume = data.status === "cancelled" || data.status === "failed";
       document.getElementById("detail-resume-card").style.display = canResume ? "block" : "none";
+      if (canResume) {
+        const btnR = document.getElementById("btn-resume-migration");
+        btnR.disabled = false;
+        btnR.textContent = "▶ Retomar Transpilação";
+        document.getElementById("resume-status").textContent = "";
+      }
       if (data.status === "cancelled") {
         document.getElementById("pipeline-steps").innerHTML = "";
         document.getElementById("validation-error").innerHTML = "";
@@ -840,6 +846,11 @@ function renderStatus(data) {
 
   // Botão Cancelar — visível apenas durante processamento
   document.getElementById("detail-cancel-card").style.display = isRunning ? "block" : "none";
+
+  // Botão Retomar — ocultar durante processamento, resetar estado ao exibir
+  if (isRunning) {
+    document.getElementById("detail-resume-card").style.display = "none";
+  }
 
   // Status badge
   const statusEl = document.getElementById("detail-status");
