@@ -129,7 +129,12 @@ class DatabricksDeployer:
         settings = self._build_job_settings(workspace_path, job_name)
 
         if existing is not None:
-            self._client.jobs.reset(job_id=existing.job_id, new_settings=settings)
+            try:
+                from databricks.sdk.service.jobs import JobSettings
+                sdk_settings = JobSettings.from_dict(settings)
+            except (ImportError, AttributeError):
+                sdk_settings = settings  # type: ignore[assignment]
+            self._client.jobs.reset(job_id=existing.job_id, new_settings=sdk_settings)
             return existing.job_id
 
         response = self._client.jobs.create(
