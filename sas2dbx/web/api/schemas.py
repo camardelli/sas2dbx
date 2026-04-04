@@ -118,13 +118,14 @@ class ValidationSummary(BaseModel):
 
 class ValidationResponse(BaseModel):
     migration_id: str
-    validation_status: str  # pending | running | done | failed
+    validation_status: str  # pending | running | done | failed | awaiting_tables
     generated_at: str | None = None
     pipeline: dict | None = None
     summary: ValidationSummary | None = None
     notebook_results: list[dict] = []
     tables: list[TableValidationResult] = []
     error: str | None = None  # mensagem de erro quando validation_status == "failed"
+    missing_source: list[dict] = []  # tabelas de origem ausentes (awaiting_tables)
 
 
 # ---------------------------------------------------------------------------

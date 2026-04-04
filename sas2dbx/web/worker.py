@@ -365,15 +365,36 @@ class MigrationWorker:
                         notebook=ghost.notebooks[0] if ghost.notebooks else "",
                     )
 
-                # GAP-B2: injeta CREATE TABLE IF NOT EXISTS para TODOS os ghosts
-                # detectados, por notebook, antes do loop de deploy.
-                # Elimina o ciclo deploy→falha→heal(1 por vez) que esgota o cap=2
-                # quando há múltiplas tabelas faltando (ex: scored_ta + ds_agg + ...).
-                if preflight_report.has_ghosts:
+                # Opção C: MISSING_SOURCE → bloquear (requer dados reais)
+                #           MISSING_UPSTREAM → bootstrap (notebook irmão vai popular)
+                if preflight_report.missing_source:
+                    logger.warning(
+                        "MigrationWorker[validate %s]: %d tabela(s) de origem ausente(s) — "
+                        "bloqueando deploy até ingestão manual",
+                        migration_id, len(preflight_report.missing_source),
+                    )
+                    meta = self._storage.get_meta(migration_id)
+                    meta["validation"] = {
+                        "status": "awaiting_tables",
+                        "preflight": meta.get("validation", {}).get("preflight", {}),
+                        "missing_source": [
+                            {
+                                "table": g.table_name,
+                                "notebooks": g.notebooks,
+                                "suggestion": g.suggestion,
+                            }
+                            for g in preflight_report.missing_source
+                        ],
+                    }
+                    self._storage.save_meta(migration_id, meta)
+                    return  # Interrompe — aguarda criação das tabelas de origem
+
+                # Bootstrap apenas para MISSING_UPSTREAM (tabelas intermediárias)
+                if preflight_report.missing_upstream:
                     total_bootstrapped = 0
                     for nb in notebooks:
                         relevant = [
-                            g for g in preflight_report.ghost_sources
+                            g for g in preflight_report.missing_upstream
                             if nb.stem in g.notebooks
                         ]
                         if relevant:
@@ -381,7 +402,7 @@ class MigrationWorker:
                             total_bootstrapped += len(created)
                     if total_bootstrapped:
                         logger.info(
-                            "MigrationWorker[validate %s]: preflight-bootstrap — "
+                            "MigrationWorker[validate %s]: preflight-bootstrap upstream — "
                             "%d placeholder(s) injetados nos notebooks antes do deploy",
                             migration_id, total_bootstrapped,
                         )

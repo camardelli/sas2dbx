@@ -461,6 +461,56 @@ async def get_validation_report(
 
 
 # ---------------------------------------------------------------------------
+# Validation resume endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/migrations/{migration_id}/validation/resume", status_code=202)
+async def resume_validation(
+    migration_id: UUID,
+    request: Request,
+) -> ValidationResponse:
+    """Retoma o deploy após o usuário criar as tabelas de origem ausentes.
+
+    Requer que a validação esteja em status 'awaiting_tables'.
+    Re-executa o preflight: se as tabelas agora existem, prossegue com deploy.
+    """
+    storage = _storage(request)
+    cfg = _dbx_config(request)
+
+    if cfg is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Configure as credenciais Databricks primeiro via POST /config/databricks.",
+        )
+
+    try:
+        meta = storage.get_meta(str(migration_id))
+    except MigrationNotFoundError:
+        raise HTTPException(status_code=404, detail="Migração não encontrada.") from None
+
+    validation = meta.get("validation", {})
+    if validation.get("status") != "awaiting_tables":
+        raise HTTPException(
+            status_code=409,
+            detail="Validação não está aguardando tabelas (status atual: "
+                   f"{validation.get('status', 'none')}).",
+        )
+
+    # Reinicia validação completa — preflight re-checará tabelas e prosseguirá se OK
+    meta["validation"] = {"status": "running"}
+    storage.save_meta(str(migration_id), meta)
+
+    worker = request.app.state.worker
+    worker.start_validation(str(migration_id), cfg, [], False, False)
+
+    return ValidationResponse(
+        migration_id=str(migration_id),
+        validation_status="running",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Cancel endpoint
 # ---------------------------------------------------------------------------
 
@@ -778,4 +828,5 @@ def _build_validation_response(migration_id: str, validation: dict) -> Validatio
         notebook_results=notebook_results,
         tables=tables,
         error=validation.get("error"),
+        missing_source=validation.get("missing_source", []),
     )

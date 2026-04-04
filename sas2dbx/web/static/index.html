@@ -557,6 +557,20 @@
     <div id="validation-error"></div>
   </div>
 
+  <!-- Card: Aguardando tabelas de origem (preflight bloqueou o deploy) -->
+  <div class="card" id="detail-awaiting-tables-card" style="display:none;border-left:3px solid var(--yellow)">
+    <h2 style="color:var(--yellow)">⚠ Tabelas de origem ausentes no Databricks</h2>
+    <p style="font-size:.88rem;color:var(--muted);margin:4px 0 12px">
+      As tabelas abaixo precisam existir e estar populadas antes do deploy.
+      Crie-as no Databricks e clique em <strong>Verificar e Retomar Deploy</strong>.
+    </p>
+    <div id="awaiting-tables-list" style="margin-bottom:12px"></div>
+    <div class="action-bar">
+      <button class="btn-action primary" id="btn-resume-validation">Verificar e Retomar Deploy</button>
+      <span id="resume-validation-status" style="font-size:.8rem;color:var(--muted);margin-left:8px"></span>
+    </div>
+  </div>
+
   <!-- Card: Retomar (visível quando cancelled ou failed e há jobs DONE no state) -->
   <div class="card" id="detail-resume-card" style="display:none">
     <div class="action-bar">
@@ -1017,6 +1031,32 @@ async function resumeMigration() {
 
 document.getElementById("btn-resume-migration").addEventListener("click", resumeMigration);
 
+async function resumeValidation() {
+  const id = currentMigrationId();
+  const btn = document.getElementById("btn-resume-validation");
+  const statusEl = document.getElementById("resume-validation-status");
+  btn.disabled = true;
+  btn.textContent = "Verificando…";
+  statusEl.textContent = "";
+  try {
+    await apiFetch(`/migrations/${id}/validation/resume`, { method: "POST" });
+    document.getElementById("detail-awaiting-tables-card").style.display = "none";
+    document.getElementById("detail-validation-card").style.display = "block";
+    document.getElementById("btn-validate").disabled = true;
+    document.getElementById("btn-validate").textContent = "Deploy em andamento…";
+    renderPipelineStep("deploy",    "running", "Deploy",    "Fazendo deploy no workspace…");
+    renderPipelineStep("execution", "pending", "Execução",  "Aguardando deploy…");
+    renderPipelineStep("result",    "pending", "Resultado", "—");
+    _validationTimer = setInterval(() => pollValidation(id), 5000);
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = "Verificar e Retomar Deploy";
+    statusEl.textContent = "Erro: " + e.message;
+  }
+}
+
+document.getElementById("btn-resume-validation").addEventListener("click", resumeValidation);
+
 // ============================================================
 // Validação & Healing — fluxo completo automatizado
 // ============================================================
@@ -1031,6 +1071,7 @@ async function startValidation() {
   const id = currentMigrationId();
   document.getElementById("btn-validate").disabled = true;
   document.getElementById("btn-validate").textContent = "Iniciando…";
+  document.getElementById("detail-awaiting-tables-card").style.display = "none";
   document.getElementById("detail-validation-card").style.display = "block";
   document.getElementById("validation-error").innerHTML = "";
   renderPipelineStep("deploy",    "pending", "Deploy",    "Preparando notebook…");
@@ -1058,6 +1099,29 @@ async function pollValidation(id) {
   try {
     const r = await apiFetch(`/migrations/${id}/validation`);
     const data = await r.json();
+
+    if (data.validation_status === "awaiting_tables") {
+      clearInterval(_validationTimer);
+      _validationTimer = null;
+      const missing = data.missing_source || [];
+      const listHtml = missing.length
+        ? missing.map(t => `
+            <div style="padding:6px 0;border-bottom:1px solid var(--border)">
+              <span style="font-family:monospace;color:var(--yellow)">${encodeHTML(t.table)}</span>
+              <br><span style="font-size:.8rem;color:var(--muted)">${encodeHTML(t.suggestion || "")}</span>
+              <br><span style="font-size:.75rem;color:var(--muted)">Usada em: ${encodeHTML((t.notebooks||[]).join(", "))}</span>
+            </div>`).join("")
+        : '<span style="color:var(--muted)">Nenhuma tabela identificada.</span>';
+      document.getElementById("awaiting-tables-list").innerHTML = listHtml;
+      document.getElementById("detail-awaiting-tables-card").style.display = "block";
+      document.getElementById("detail-validation-card").style.display = "none";
+      document.getElementById("btn-validate").disabled = false;
+      document.getElementById("btn-validate").textContent = "Deploy & Executar no Databricks";
+      renderPipelineStep("deploy", "pending", "Deploy", "Aguardando criação das tabelas de origem…");
+      renderPipelineStep("execution", "pending", "Execução", "—");
+      renderPipelineStep("result",    "pending", "Resultado", "—");
+      return;
+    }
 
     if (data.validation_status === "running" || data.validation_status === "pending") {
       const nbs = data.notebook_results || [];
