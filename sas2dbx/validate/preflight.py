@@ -34,6 +34,16 @@ _RE_READ_TABLE = re.compile(
     r'spark\.read\.table\(\s*["\']([^"\']+)["\']\s*\)',
     re.IGNORECASE,
 )
+# f-string: spark.read.table(f"prefix.{VAR}") ou spark.read.table(f"{VAR}.suffix.{VAR2}")
+_RE_READ_TABLE_FSTRING = re.compile(
+    r'spark\.read\.table\(\s*f["\']([^"\']+)["\']\s*\)',
+    re.IGNORECASE,
+)
+# Atribuição de variável de string simples: VAR = "valor" ou VAR = 'valor'
+_RE_VAR_ASSIGN = re.compile(
+    r'^[ \t]*([A-Z_][A-Z0-9_]*)\s*=\s*["\']([^"\']+)["\']',
+    re.MULTILINE,
+)
 _RE_SPARK_SQL_FROM = re.compile(
     r'FROM\s+([`"\']?[\w.]+[`"\']?)',
     re.IGNORECASE,
@@ -217,17 +227,46 @@ class PreflightChecker:
     # Internal
     # ------------------------------------------------------------------
 
+    def _resolve_fstring_tables(self, content: str) -> list[str]:
+        """Resolve f-strings em spark.read.table(f"...{VAR}...") usando atribuições do notebook."""
+        # Coleta todas as atribuições simples: VAR = "valor"
+        var_map: dict[str, str] = {}
+        for m in _RE_VAR_ASSIGN.finditer(content):
+            var_map[m.group(1)] = m.group(2)
+
+        resolved: list[str] = []
+        for m in _RE_READ_TABLE_FSTRING.finditer(content):
+            template = m.group(1)  # ex: "telcostar.operacional.{DS_AGG}"
+            # Substitui todas as ocorrências de {VAR} pelos valores conhecidos
+            try:
+                result = re.sub(
+                    r'\{([A-Z_][A-Z0-9_]*)\}',
+                    lambda mm: var_map.get(mm.group(1), mm.group(0)),
+                    template,
+                )
+                # Só adiciona se todos os placeholders foram resolvidos (sem { restante)
+                if "{" not in result:
+                    resolved.append(result)
+            except Exception:  # noqa: BLE001
+                pass
+        return resolved
+
     def _extract_input_tables(self, content: str) -> list[str]:
         """Extrai tabelas de entrada (leitura) de um notebook.
 
         Exclui tabelas que aparecem apenas em saveAsTable (escrita).
+        Inclui f-strings resolvidas via atribuições de variável no notebook.
         """
         read_tables: set[str] = set()
         write_tables: set[str] = set()
 
-        # spark.read.table("...") — sempre leitura
+        # spark.read.table("...") — sempre leitura (string literal)
         for m in _RE_READ_TABLE.finditer(content):
             read_tables.add(m.group(1).strip("`\"'"))
+
+        # spark.read.table(f"...{VAR}...") — f-string resolvida via variáveis do notebook
+        for t in self._resolve_fstring_tables(content):
+            read_tables.add(t.strip("`\"'"))
 
         # FROM/JOIN em spark.sql — pode ser leitura ou escrita (CREATE TABLE ... AS SELECT)
         # Heurística: se a tabela aparece em FROM/JOIN mas não em saveAsTable → leitura
