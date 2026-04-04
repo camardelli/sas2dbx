@@ -194,15 +194,46 @@
     /* ---- Jobs list ---- */
     .job-row {
       display: flex;
-      align-items: center;
-      gap: 10px;
+      flex-direction: column;
+      gap: 4px;
       padding: 8px 0;
       border-bottom: 1px solid var(--border);
       font-size: .88rem;
     }
     .job-row:last-child { border-bottom: none; }
+    .job-row-main { display: flex; align-items: center; gap: 10px; width: 100%; }
     .job-name { flex: 1; }
     .job-conf { color: var(--muted); font-size: .8rem; min-width: 60px; text-align: right; }
+    .job-error-toggle {
+      background: none; border: none; color: var(--red); font-size: .75rem;
+      cursor: pointer; padding: 0 4px; opacity: .8;
+    }
+    .job-error-toggle:hover { opacity: 1; text-decoration: underline; }
+    .job-error-detail {
+      background: rgba(239,68,68,.07);
+      border-left: 2px solid var(--red);
+      border-radius: 4px;
+      padding: 8px 10px;
+      font-size: .78rem;
+      color: #f87171;
+      font-family: "SF Mono", "Fira Code", monospace;
+      white-space: pre-wrap;
+      word-break: break-all;
+      display: none;
+    }
+    .job-error-detail.open { display: block; }
+    .btn-retry-failed {
+      background: rgba(245,158,11,.12);
+      color: var(--yellow);
+      border: 1px solid rgba(245,158,11,.3);
+      border-radius: 6px;
+      padding: 6px 14px;
+      font-size: .83rem;
+      cursor: pointer;
+      transition: background .15s;
+    }
+    .btn-retry-failed:hover { background: rgba(245,158,11,.22); }
+    .btn-retry-failed:disabled { opacity: .5; cursor: not-allowed; }
 
     /* ---- Actions ---- */
     .action-bar { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 8px; }
@@ -528,7 +559,10 @@
   </div>
 
   <div class="card" id="detail-jobs-card">
-    <h2 id="jobs-title">Jobs</h2>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+      <h2 id="jobs-title" style="margin-bottom:0">Jobs</h2>
+      <button class="btn-retry-failed" id="btn-retry-failed" style="display:none">↺ Resubmeter Jobs Falhados</button>
+    </div>
     <div id="jobs-list"></div>
   </div>
 
@@ -933,15 +967,31 @@ function renderStatus(data) {
 
   // Jobs list
   const list = document.getElementById("jobs-list");
+  const retryBtn = document.getElementById("btn-retry-failed");
   if (data.jobs && data.jobs.length) {
+    const failedJobs = data.jobs.filter(j => j.status === "failed");
     document.getElementById("jobs-title").textContent = `Jobs (${data.jobs.length})`;
-    list.innerHTML = data.jobs.map(j => `
-      <div class="job-row">
-        <span class="job-name">${encodeHTML(j.job_id)}</span>
-        ${badge(j.status)}
-        <span class="job-conf">${j.confidence != null && j.confidence > 0 ? (j.confidence * 100).toFixed(0) + "%" : "—"}</span>
-      </div>`).join("");
+    // Botão de retry aparece quando há falhas e transpilação não está em andamento
+    retryBtn.style.display = failedJobs.length > 0 && !isRunning ? "inline-block" : "none";
+    retryBtn.textContent = `↺ Resubmeter Falhados (${failedJobs.length})`;
+    retryBtn.dataset.failedIds = JSON.stringify(failedJobs.map(j => j.job_id));
+
+    list.innerHTML = data.jobs.map(j => {
+      const rowId = "jerr-" + encodeHTML(j.job_id).replace(/\W/g, "_");
+      const errorBlock = j.error ? `
+        <button class="job-error-toggle" onclick="toggleJobError('${rowId}')">▼ ver erro</button>
+        <div class="job-error-detail" id="${rowId}">${encodeHTML(j.error)}</div>` : "";
+      return `<div class="job-row">
+        <div class="job-row-main">
+          <span class="job-name">${encodeHTML(j.job_id)}</span>
+          ${badge(j.status)}
+          <span class="job-conf">${j.confidence != null && j.confidence > 0 ? (j.confidence * 100).toFixed(0) + "%" : "—"}</span>
+        </div>
+        ${errorBlock}
+      </div>`;
+    }).join("");
   } else {
+    retryBtn.style.display = "none";
     list.innerHTML = `<div style="color:var(--muted);font-size:.88rem;padding:8px 0">${isRunning ? "Aguardando início do processamento…" : "Nenhum job encontrado."}</div>`;
   }
 
@@ -1055,6 +1105,41 @@ async function resumeMigration() {
 }
 
 document.getElementById("btn-resume-migration").addEventListener("click", resumeMigration);
+
+function toggleJobError(rowId) {
+  const el = document.getElementById(rowId);
+  if (!el) return;
+  const btn = el.previousElementSibling;
+  const open = el.classList.toggle("open");
+  if (btn) btn.textContent = open ? "▲ ocultar erro" : "▼ ver erro";
+}
+
+async function retryFailedJobs(jobIds) {
+  const id = currentMigrationId();
+  const btn = document.getElementById("btn-retry-failed");
+  btn.disabled = true;
+  btn.textContent = "Resubmetendo…";
+  try {
+    const body = jobIds && jobIds.length ? { job_ids: jobIds } : {};
+    await apiFetch(`/migrations/${id}/retry-failed`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    // Reinicia polling
+    stopPolling();
+    startPolling(id);
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = `↺ Resubmeter Falhados`;
+    alert("Erro ao resubmeter: " + e.message);
+  }
+}
+
+document.getElementById("btn-retry-failed").addEventListener("click", function() {
+  const ids = JSON.parse(this.dataset.failedIds || "[]");
+  retryFailedJobs(ids);
+});
 
 async function resumeValidation() {
   const id = currentMigrationId();

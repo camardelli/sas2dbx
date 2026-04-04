@@ -15,6 +15,7 @@ class JobProgress(BaseModel):
     job_id: str
     status: str
     confidence: float | None = None
+    error: str | None = None
 
 
 class ProgressSummary(BaseModel):
@@ -38,6 +39,14 @@ class MigrationSummary(BaseModel):
     migration_id: str
     status: str
     created_at: str
+    transpile_status: str = "pending"
+    deploy_status: str = "pending"
+    execution_status: str = "pending"
+
+
+class RetryFailedRequest(BaseModel):
+    job_ids: list[str] | None = None
+    """Job IDs específicos a resubmeter. None = resubmete todos os falhados."""
 
 
 class JobResult(BaseModel):

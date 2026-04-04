@@ -39,6 +39,7 @@ from sas2dbx.web.api.schemas import (
     MigrationStatusResponse,
     MigrationSummary,
     ProgressSummary,
+    RetryFailedRequest,
     TableValidationResult,
     ValidationRequest,
     ValidationResponse,
@@ -648,6 +649,87 @@ async def resume_migration(migration_id: UUID, request: Request):
 
     worker.start(str(migration_id))
     return {"migration_id": str(migration_id), "status": "processing"}
+
+
+@router.post("/migrations/{migration_id}/retry-failed", status_code=202)
+async def retry_failed_jobs(
+    migration_id: UUID,
+    request: Request,
+    body: RetryFailedRequest | None = None,
+) -> dict:
+    """Resubmete jobs com falha de transpilação para re-tentativa.
+
+    Disponível quando status é 'done', 'failed' ou 'cancelled' e há jobs FAILED.
+    Reseta os jobs falhados para PENDING e reinicia o pipeline de transpilação,
+    preservando os jobs já concluídos (DONE) via checkpointing do state.json.
+
+    Body opcional:
+      job_ids: lista de job IDs específicos a resubmeter (None = todos os falhados).
+    """
+    storage: MigrationStorage = request.app.state.storage
+    worker: MigrationWorker = request.app.state.worker
+
+    try:
+        meta = storage.get_meta(str(migration_id))
+    except MigrationNotFoundError:
+        raise HTTPException(status_code=404, detail="Migração não encontrada.") from None
+
+    status = meta.get("status", "")
+    if status not in ("done", "failed", "cancelled"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Retry disponível apenas para status done/failed/cancelled (atual: {status!r}).",
+        )
+
+    # Identifica jobs falhados via state.json
+    from pathlib import Path
+    from sas2dbx.transpile.state import MigrationStateManager
+
+    output_dir = Path(storage._migration_dir(str(migration_id))) / "output"
+    state_mgr = MigrationStateManager(output_dir)
+    if not state_mgr.load():
+        raise HTTPException(
+            status_code=409,
+            detail="State file não encontrado — não é possível identificar jobs falhados.",
+        )
+
+    failed_jobs = state_mgr.get_failed_jobs()
+    if not failed_jobs:
+        raise HTTPException(
+            status_code=409,
+            detail="Nenhum job com status FAILED encontrado.",
+        )
+
+    # Filtra por job_ids se fornecido
+    target_ids = body.job_ids if (body and body.job_ids) else None
+    if target_ids:
+        unknown = [j for j in target_ids if j not in failed_jobs]
+        if unknown:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Job(s) não encontrado(s) ou não falhado(s): {unknown}",
+            )
+        to_retry = target_ids
+    else:
+        to_retry = failed_jobs
+
+    reset_count = state_mgr.reset_jobs_to_pending(to_retry)
+    if reset_count == 0:
+        raise HTTPException(status_code=409, detail="Nenhum job foi resetado.")
+
+    worker._cancel_events.pop(str(migration_id), None)
+    storage.update_status(str(migration_id), "processing")
+    logger.info(
+        "retry_failed_jobs: resubmetendo %d job(s) de %s: %s",
+        reset_count, migration_id, to_retry,
+    )
+
+    worker.start(str(migration_id))
+    return {
+        "migration_id": str(migration_id),
+        "status": "processing",
+        "retrying": to_retry,
+    }
 
 
 # ---------------------------------------------------------------------------

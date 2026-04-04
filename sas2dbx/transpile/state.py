@@ -168,6 +168,34 @@ class MigrationStateManager:
                 result[job_id] = JobStatus.PENDING
         return result
 
+    def get_failed_jobs(self) -> list[str]:
+        """Retorna lista de job_ids com status FAILED."""
+        return [
+            job_id
+            for job_id, info in self._state.get("jobs", {}).items()
+            if info.get("status") == JobStatus.FAILED.value
+        ]
+
+    def reset_jobs_to_pending(self, job_ids: list[str]) -> int:
+        """Reseta jobs específicos para PENDING, permitindo re-transpilação.
+
+        Args:
+            job_ids: Lista de job_ids a resetar.
+
+        Returns:
+            Quantidade de jobs efetivamente resetados.
+        """
+        count = 0
+        with self._lock:
+            jobs = self._state.get("jobs", {})
+            for job_id in job_ids:
+                if job_id in jobs:
+                    jobs[job_id] = {"status": JobStatus.PENDING.value}
+                    count += 1
+            self._save_locked()
+        logger.info("StateManager: %d job(s) resetados para PENDING: %s", count, job_ids)
+        return count
+
     @property
     def state_path(self) -> Path:
         """Caminho do arquivo de estado."""

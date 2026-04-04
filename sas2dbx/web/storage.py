@@ -190,10 +190,12 @@ class MigrationStorage:
                     if job_status == "in_progress" and not migration_active:
                         job_status = "failed"
                     confidence = job_data.get("confidence")
+                    error = job_data.get("error") if job_status == "failed" else None
                     jobs.append({
                         "job_id": job_id,
                         "status": job_status,
                         "confidence": confidence,
+                        "error": error,
                     })
                     progress["total"] += 1
                     key = job_status if job_status in progress else "pending"
@@ -249,6 +251,7 @@ class MigrationStorage:
                     "migration_id": meta["migration_id"],
                     "status": meta["status"],
                     "created_at": meta["created_at"],
+                    **_derive_stage_statuses(meta),
                 })
             except (json.JSONDecodeError, KeyError):
                 pass
@@ -269,6 +272,53 @@ class MigrationStorage:
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, path)
+
+
+def _derive_stage_statuses(meta: dict) -> dict:
+    """Deriva os status das 3 etapas (Transpilação, Deploy, Execução) a partir do meta."""
+    raw = meta.get("status", "pending")
+    if raw == "done":
+        transpile = "done"
+    elif raw in ("failed", "cancelled", "error"):
+        transpile = "failed"
+    else:
+        transpile = "pending"
+
+    validation = meta.get("validation") or {}
+    val_status = validation.get("status", "pending")
+    report = validation.get("report") or {}
+    summary = report.get("summary") or {}
+    notebooks = report.get("notebooks") or []
+
+    has_job_id = any(n.get("job_id") for n in notebooks)
+    has_run_id = any(n.get("run_id") for n in notebooks)
+
+    if has_job_id:
+        deploy = "done"
+    elif val_status in ("failed", "cancelled") and not has_job_id:
+        deploy = "failed" if validation.get("error") else "pending"
+    else:
+        deploy = "pending"
+
+    overall = summary.get("overall_status", "")
+    notebooks_failed = summary.get("notebooks_failed", 0)
+    notebooks_ok = summary.get("notebooks_ok", 0)
+    total = summary.get("total_notebooks", 0)
+    if has_run_id or overall:
+        if overall == "failed" or notebooks_failed > 0:
+            execution = "failed"
+        elif overall in ("ok", "success") or (total > 0 and notebooks_ok == total):
+            execution = "done"
+        else:
+            execution = "failed"
+    else:
+        execution = "pending"
+
+    return {
+        "transpile_status": transpile,
+        "deploy_status": deploy,
+        "execution_status": execution,
+    }
 
 
 def _now_iso() -> str:
