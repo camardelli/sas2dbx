@@ -747,9 +747,28 @@ class MigrationWorker:
         # 4 — Transpilação (com LLM para Tier 2 se configurado)
         step("transpile", "running", f"0 / {len(sas_files)} jobs")
         llm_client = LLMClient(self._llm_config)
+
+        # Auto-resume: se o state file já contém jobs DONE, retoma de onde parou
+        # (interrupção por cancel ou crash anterior)
+        from sas2dbx.transpile.state import MigrationStateManager
+        from sas2dbx.models.migration_result import JobStatus as _JS
+        _state_path = output_dir / ".sas2dbx_state.json"
+        _auto_resume = False
+        if _state_path.exists():
+            _sm = MigrationStateManager(output_dir)
+            if _sm.load():
+                _done = [j for j in execution_order if _sm.get_job_status(j) == _JS.DONE]
+                if _done:
+                    _auto_resume = True
+                    logger.info(
+                        "MigrationWorker [%s]: auto-resume — %d job(s) já concluído(s), retomando",
+                        migration_id,
+                        len(_done),
+                    )
+
         engine = TranspilationEngine(
             output_dir=output_dir,
-            resume=False,
+            resume=_auto_resume,
             llm_client=llm_client if llm_client._primary.is_available() else None,
             catalog=meta.get("config", {}).get("catalog", "main"),
             schema=meta.get("config", {}).get("schema", "migrated"),

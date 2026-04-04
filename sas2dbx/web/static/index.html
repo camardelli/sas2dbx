@@ -557,6 +557,14 @@
     <div id="validation-error"></div>
   </div>
 
+  <!-- Card: Retomar (visível quando cancelled ou failed e há jobs DONE no state) -->
+  <div class="card" id="detail-resume-card" style="display:none">
+    <div class="action-bar">
+      <button class="btn-action primary" id="btn-resume-migration">▶ Retomar Transpilação</button>
+      <span id="resume-status" style="font-size:.8rem;color:var(--muted);margin-left:8px"></span>
+    </div>
+  </div>
+
   <div class="card" id="detail-delete-card" style="display:none">
     <div class="action-bar">
       <button class="btn-action danger" id="btn-delete-migration">Remover esta migração e fazer novo upload</button>
@@ -809,6 +817,9 @@ async function fetchStatus(id) {
       if (data.status === "done") fetchResultLinks(id);
       document.getElementById("detail-cancel-card").style.display = "none";
       document.getElementById("detail-delete-card").style.display = "block";
+      // Botão Retomar: visível quando cancelled ou failed (há chance de retomar)
+      const canResume = data.status === "cancelled" || data.status === "failed";
+      document.getElementById("detail-resume-card").style.display = canResume ? "block" : "none";
       if (data.status === "cancelled") {
         document.getElementById("pipeline-steps").innerHTML = "";
         document.getElementById("validation-error").innerHTML = "";
@@ -965,6 +976,29 @@ async function cancelMigration() {
 }
 
 document.getElementById("btn-cancel-migration").addEventListener("click", cancelMigration);
+
+async function resumeMigration() {
+  const id = document.getElementById("detail-id").textContent.trim();
+  const btn = document.getElementById("btn-resume-migration");
+  const statusEl = document.getElementById("resume-status");
+  btn.disabled = true;
+  btn.textContent = "Retomando…";
+  statusEl.textContent = "";
+  try {
+    await apiFetch(`/migrations/${id}/resume`, { method: "POST" });
+    document.getElementById("detail-resume-card").style.display = "none";
+    document.getElementById("detail-cancel-card").style.display = "block";
+    document.getElementById("detail-status").innerHTML = badge("processing");
+    document.getElementById("progress-label").textContent = "Retomando…";
+    startPolling(id);
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = "▶ Retomar Transpilação";
+    statusEl.textContent = "Erro: " + e.message;
+  }
+}
+
+document.getElementById("btn-resume-migration").addEventListener("click", resumeMigration);
 
 // ============================================================
 // Validação & Healing — fluxo completo automatizado

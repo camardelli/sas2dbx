@@ -493,6 +493,38 @@ async def cancel_migration(migration_id: UUID, request: Request):
     return {"migration_id": str(migration_id), "status": "cancelled"}
 
 
+@router.post("/migrations/{migration_id}/resume", status_code=202)
+async def resume_migration(migration_id: UUID, request: Request):
+    """Retoma uma migração cancelada ou com falha de onde parou.
+
+    Só é possível quando status é 'cancelled' ou 'failed'.
+    O engine detecta o state file existente e pula os jobs já concluídos (DONE),
+    retentando apenas os pendentes/falhos.
+    """
+    worker: MigrationWorker = request.app.state.worker
+    storage: MigrationStorage = request.app.state.storage
+
+    meta = storage.get_meta(str(migration_id))
+    if not meta:
+        raise HTTPException(status_code=404, detail="Migração não encontrada.")
+
+    status = meta.get("status", "")
+    if status not in ("cancelled", "failed"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Apenas migrações canceladas ou com falha podem ser retomadas (status={status!r}).",
+        )
+
+    # Limpa sinal de cancelamento anterior se ainda existir
+    worker._cancel_events.pop(str(migration_id), None)
+
+    storage.update_status(str(migration_id), "processing")
+    logger.info("resume_migration: retomando %s (era %s)", migration_id, status)
+
+    worker.start(str(migration_id))
+    return {"migration_id": str(migration_id), "status": "processing"}
+
+
 # ---------------------------------------------------------------------------
 # Sprint 9 — Self-Healing endpoints
 # ---------------------------------------------------------------------------
