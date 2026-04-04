@@ -156,7 +156,7 @@ class TestFixerUnresolvedColumn:
             deterministic_fix="fix_unresolved_column",
             severity="HIGH",
             entities=entities,
-            raw_error=ERROR_MESSAGE,
+            error_raw=ERROR_MESSAGE,
         )
 
     def test_handler_registered(self):

@@ -5,10 +5,14 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+import time
+
 import typer
 from rich.console import Console
+from rich.live import Live
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.table import Table
+from rich.text import Text
 
 app = typer.Typer(
     name="sas2dbx",
@@ -59,12 +63,29 @@ _TIER_STYLE = {"rule": "green", "llm": "yellow", "manual": "red"}
 
 @app.command()
 def migrate(
-    source_dir: Path = typer.Argument(..., help="Diretório com arquivos .sas (ou arquivo único)"),
+    source_dir: Path = typer.Argument(
+        ..., help="Diretório, arquivo .sas único, ou arquivo .zip com jobs SAS"
+    ),
     output: Path | None = typer.Option(None, "--output", "-o", help="Diretório de saída"),
-    resume: bool = typer.Option(False, "--resume", help="Retomar migração interrompida"),
+    resume: bool = typer.Option(
+        False, "--resume", help="Forçar retomada (equivale ao comportamento automático)"
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Reiniciar do zero, descartando progresso anterior"
+    ),
     recursive: bool = typer.Option(True, "--recursive/--no-recursive", help="Busca recursiva"),
 ) -> None:
-    """Migra jobs SAS para notebooks Databricks (inventário no Sprint 1)."""
+    """Migra jobs SAS para notebooks Databricks.
+
+    Retomada automática: se --output já contém migração anterior, continua
+    a partir do último job concluído sem re-processar jobs já gerados.
+    Use --force para descartar o progresso e reiniciar do zero.
+
+    Aceita como entrada:
+      - Diretório com arquivos .sas
+      - Arquivo .zip contendo jobs SAS (extraído em output/_extracted/)
+      - Arquivo .sas único
+    """
     from sas2dbx.analyze.classifier import classify_block
     from sas2dbx.ingest.reader import read_sas_file, split_blocks
     from sas2dbx.ingest.scanner import scan_directory
@@ -73,10 +94,17 @@ def migrate(
         console.print("[red]Erro: --resume requer --output para localizar o state file.[/red]")
         raise typer.Exit(1)
 
-    # 1 — Scan
+    # 1 — Scan (suporte a diretório, .sas único ou .zip)
+    is_zip = source_dir.suffix.lower() == ".zip"
+    extract_dir = (output / "_extracted" / source_dir.stem) if (is_zip and output) else None
+
     try:
-        sas_files = scan_directory(source_dir, recursive=recursive)
-    except FileNotFoundError as exc:
+        sas_files = scan_directory(
+            source_dir,
+            recursive=recursive,
+            extract_dir=extract_dir,
+        )
+    except (FileNotFoundError, ValueError) as exc:
         console.print(f"[red]Erro: {exc}[/red]")
         raise typer.Exit(1) from exc
 
@@ -84,7 +112,13 @@ def migrate(
         console.print(f"[yellow]Nenhum arquivo .sas encontrado em {source_dir}[/yellow]")
         raise typer.Exit(0)
 
-    console.print(f"\nEncontrados [bold]{len(sas_files)}[/bold] arquivo(s) .sas\n")
+    if is_zip:
+        console.print(
+            f"\n[dim]ZIP extraído →[/dim] "
+            f"[bold]{len(sas_files)}[/bold] arquivo(s) .sas\n"
+        )
+    else:
+        console.print(f"\nEncontrados [bold]{len(sas_files)}[/bold] arquivo(s) .sas\n")
 
     # 2 — Inventário: ler + dividir + classificar com progress bar
     inventory_rows: list[tuple] = []
@@ -148,11 +182,9 @@ def migrate(
         )
 
     if output:
-        console.print(
-            f"\n[bold]Iniciando transpilação → {output}[/bold]\n"
-        )
         from sas2dbx.analyze.dependency import DependencyAnalyzer
         from sas2dbx.transpile.engine import TranspilationEngine
+        from sas2dbx.transpile.state import MigrationStateManager, JobStatus
 
         autoexec_path = source_dir / "autoexec.sas" if source_dir.is_dir() else None
         analyzer = DependencyAnalyzer(
@@ -161,28 +193,129 @@ def migrate(
         graph = analyzer.analyze(sas_files)
         execution_order = graph.get_execution_order()
 
+        # --- Auto-detecção de migração anterior ---
+        # Se output já contém um state file com jobs concluídos E --force não foi
+        # passado, retomamos automaticamente sem exigir --resume explícito.
+        effective_resume = resume or force is False  # padrão: tentar retomar
+        _state_path = output / ".sas2dbx_state.json"
+        if _state_path.exists() and not force:
+            _sm = MigrationStateManager(output)
+            if _sm.load():
+                _done = [
+                    j for j in execution_order
+                    if _sm.get_job_status(j) == JobStatus.DONE
+                ]
+                _pending = len(execution_order) - len(_done)
+                if _done:
+                    console.print(
+                        f"\n[yellow]Migração anterior detectada:[/yellow] "
+                        f"[green]{len(_done)} job(s) concluído(s)[/green], "
+                        f"[cyan]{_pending} pendente(s)[/cyan]\n"
+                        f"[dim]  Retomando automaticamente. "
+                        f"Use --force para reiniciar do zero.[/dim]\n"
+                    )
+                    effective_resume = True
+                else:
+                    effective_resume = False  # state existe mas sem DONE — inicia do zero
+        elif force:
+            effective_resume = False
+            console.print(
+                "[yellow]--force: descartando progresso anterior e reiniciando do zero.[/yellow]\n"
+            )
+        else:
+            effective_resume = False
+
+        console.print(f"[bold]Iniciando transpilação → {output}[/bold]\n")
+
+        # Estado por job: "pending" | "skipped" | "running" | "done" | "failed"
+        _STATUS_INIT = "skipped" if effective_resume else "pending"
+        job_statuses: dict[str, str] = {j: _STATUS_INIT for j in execution_order}
+        # Jobs que serão realmente processados começam como "pending"
+        jobs_to_process = set(
+            j for j in execution_order
+            if not effective_resume
+            or True  # será corrigido via callback "skipped" para os já DONE
+        )
+        job_start_times: dict[str, float] = {}
+
+        def _render_table() -> Table:
+            tbl = Table(
+                show_header=True,
+                show_lines=False,
+                box=None,
+                padding=(0, 1),
+            )
+            tbl.add_column("#", style="dim", width=4, justify="right")
+            tbl.add_column("Job", no_wrap=True, min_width=30)
+            tbl.add_column("Status", width=20)
+            tbl.add_column("Duração", width=8, justify="right")
+
+            for idx, job_id in enumerate(execution_order, 1):
+                st = job_statuses[job_id]
+
+                if st == "skipped":
+                    status_text = Text("↩ DONE (anterior)", style="dim green")
+                elif st == "pending":
+                    status_text = Text("  PENDING", style="dim")
+                elif st == "running":
+                    status_text = Text("▶ RUNNING", style="bold cyan")
+                elif st == "done":
+                    status_text = Text("✓ DONE", style="green")
+                else:
+                    status_text = Text("✗ FALHOU", style="bold red")
+
+                elapsed = ""
+                if st == "running" and job_id in job_start_times:
+                    secs = time.monotonic() - job_start_times[job_id]
+                    elapsed = f"{secs:.0f}s"
+                elif st in ("done", "failed") and job_id in job_start_times:
+                    secs = time.monotonic() - job_start_times[job_id]
+                    elapsed = f"{secs:.0f}s"
+
+                tbl.add_row(str(idx), job_id, status_text, elapsed)
+
+            total = len(execution_order)
+            n_done = sum(1 for s in job_statuses.values() if s in ("done", "skipped"))
+            n_running = sum(1 for s in job_statuses.values() if s == "running")
+            n_fail = sum(1 for s in job_statuses.values() if s == "failed")
+            tbl.caption = (
+                f"[green]{n_done} concluído(s)[/green]"
+                + (f"  [cyan]{n_running} em execução[/cyan]" if n_running else "")
+                + (f"  [red]{n_fail} com erro[/red]" if n_fail else "")
+                + f"  [dim]{total} total[/dim]"
+            )
+            return tbl
+
+        def _on_progress(job_id: str, status: str) -> None:
+            if status == "running":
+                job_start_times[job_id] = time.monotonic()
+            job_statuses[job_id] = status
+
         engine = TranspilationEngine(
             output_dir=output,
-            resume=resume,
+            resume=effective_resume,
+            on_progress=_on_progress,
         )
 
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TextColumn("{task.completed}/{task.total}"),
-            TimeElapsedColumn(),
+        with Live(
+            _render_table(),
             console=console,
-        ) as progress:
-            eng_task = progress.add_task("Transpilando jobs...", total=len(execution_order))
-            results = engine.run(sas_files, execution_order)
-            progress.update(eng_task, completed=len(execution_order))
+            refresh_per_second=4,
+            vertical_overflow="visible",
+        ) as live:
+            def _on_progress_live(job_id: str, status: str) -> None:
+                _on_progress(job_id, status)
+                live.update(_render_table())
 
-        done = sum(1 for r in results if r.status == "done")
-        failed = len(results) - done
+            engine._on_progress = _on_progress_live
+            results = engine.run(sas_files, execution_order)
+            live.update(_render_table())
+
+        n_done = sum(1 for r in results if r.status == JobStatus.DONE)
+        n_fail = len(results) - n_done
         console.print(
-            f"\nConcluído: [green]{done} transpilado(s)[/green]"
-            + (f" · [red]{failed} com erro[/red]" if failed else "")
+            f"\nConcluído: [green]{n_done} transpilado(s)[/green]"
+            + (f" · [red]{n_fail} com erro[/red]" if n_fail else "")
         )
 
 
@@ -819,6 +952,206 @@ def serve(
         reload=reload,
         log_level="info",
     )
+
+
+# ---------------------------------------------------------------------------
+# sas2dbx check-tables
+# ---------------------------------------------------------------------------
+
+
+@app.command(name="check-tables")
+def check_tables(
+    output_dir: Path = typer.Argument(..., help="Diretório com notebooks .py gerados"),
+    host: str = typer.Option(
+        None, "--host", envvar="DATABRICKS_HOST", help="URL do workspace Databricks"
+    ),
+    token: str = typer.Option(
+        None, "--token", envvar="DATABRICKS_TOKEN", help="Personal Access Token Databricks"
+    ),
+    catalog: str = typer.Option("main", "--catalog", help="Unity Catalog de destino"),
+    db_schema: str = typer.Option("migrated", "--schema", help="Schema de destino"),
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Continua sem solicitar confirmação interativa"
+    ),
+    offline: bool = typer.Option(
+        False, "--offline", help="Apenas lista tabelas referenciadas, sem verificar no Databricks"
+    ),
+    report_path: Path | None = typer.Option(
+        None, "--report", "-r", help="Salva relatório JSON com resultado do check"
+    ),
+) -> None:
+    """Verifica tabelas necessárias pelos JOBs migrados antes do deploy.
+
+    Lista tabelas existentes, ausentes (source) e dependências upstream,
+    com opção de continuar ou abortar o fluxo de deploy.
+
+    Exemplos:
+
+      # Verificação completa com credenciais Databricks
+      sas2dbx check-tables ./output --host https://... --token dapi...
+
+      # Apenas listar tabelas referenciadas (sem conectar ao Databricks)
+      sas2dbx check-tables ./output --offline
+
+      # Modo não-interativo para CI/CD (falha se tabelas ausentes)
+      sas2dbx check-tables ./output --yes
+    """
+    import json as _json
+
+    from sas2dbx.validate.preflight import PreflightChecker, TableCategory
+
+    notebooks = sorted(output_dir.glob("*.py"))
+    if not notebooks:
+        console.print(f"[yellow]Nenhum notebook .py encontrado em {output_dir}[/yellow]")
+        raise typer.Exit(0)
+
+    console.print(
+        f"\n[bold]Check de Tabelas[/bold] — {len(notebooks)} notebook(s) em "
+        f"[cyan]{output_dir}[/cyan]\n"
+    )
+
+    if offline:
+        # Modo offline: apenas extrai e lista tabelas sem verificar existência
+        checker_offline = PreflightChecker(config=None)
+        all_tables: dict[str, list[str]] = {}
+        for nb in notebooks:
+            try:
+                content = nb.read_text(encoding="utf-8")
+                for t in checker_offline._extract_input_tables(content):
+                    all_tables.setdefault(t, []).append(nb.stem)
+            except OSError:
+                pass
+
+        if not all_tables:
+            console.print("[green]✓[/green] Nenhuma tabela de entrada referenciada detectada.\n")
+            raise typer.Exit(0)
+
+        tbl = Table(title="Tabelas Referenciadas (modo offline)", show_lines=False)
+        tbl.add_column("Tabela", style="cyan", no_wrap=True)
+        tbl.add_column("Notebooks", style="dim")
+        for table_name, nbs in sorted(all_tables.items()):
+            tbl.add_row(table_name, ", ".join(nbs))
+        console.print(tbl)
+        console.print(f"\n[dim]Total: {len(all_tables)} tabela(s) referenciada(s)[/dim]\n")
+        raise typer.Exit(0)
+
+    # Modo online: verifica existência no Databricks
+    if not host or not token:
+        console.print(
+            "[red]Erro: --host/DATABRICKS_HOST e --token/DATABRICKS_TOKEN são obrigatórios "
+            "para verificação online. Use --offline para listar sem conectar.[/red]"
+        )
+        raise typer.Exit(1)
+
+    try:
+        from sas2dbx.validate.config import DatabricksConfig
+    except ImportError:
+        console.print(
+            "[red]Erro: dependências Databricks não instaladas. "
+            "Execute: pip install sas2dbx[databricks][/red]"
+        )
+        raise typer.Exit(1) from None
+
+    cfg = DatabricksConfig(
+        host=host.rstrip("/"),
+        token=token,
+        catalog=catalog,
+        schema=db_schema,
+    )
+
+    checker = PreflightChecker(config=cfg)
+
+    with console.status("[bold]Verificando tabelas no catálogo Databricks..."):
+        report = checker.check(output_dir)
+
+    if report.skipped:
+        console.print(f"[yellow]⚠[/yellow]  Verificação ignorada: {report.skip_reason}\n")
+        raise typer.Exit(0)
+
+    # ---- Tabelas existentes ----
+    if report.existing_tables:
+        tbl_ok = Table(show_header=True, show_lines=False, box=None)
+        tbl_ok.add_column("✓", style="green", width=3)
+        tbl_ok.add_column("Tabela", style="green")
+        for t in sorted(report.existing_tables):
+            tbl_ok.add_row("✓", t)
+        console.print(tbl_ok)
+
+    # ---- Tabelas ausentes ----
+    if report.ghost_sources:
+        console.print()
+        tbl_missing = Table(
+            title=f"[bold red]Tabelas Ausentes ({len(report.ghost_sources)})[/bold red]",
+            show_lines=True,
+        )
+        tbl_missing.add_column("Tabela", style="red", no_wrap=True)
+        tbl_missing.add_column("Tipo", width=12)
+        tbl_missing.add_column("Notebooks", style="dim")
+        tbl_missing.add_column("Ação sugerida")
+
+        for ghost in sorted(report.ghost_sources, key=lambda g: (g.category.value, g.table_name)):
+            if ghost.category == TableCategory.MISSING_UPSTREAM:
+                tipo = "[yellow]upstream[/yellow]"
+            else:
+                tipo = "[red]source[/red]"
+            tbl_missing.add_row(
+                ghost.table_name,
+                tipo,
+                ", ".join(ghost.notebooks),
+                ghost.suggestion,
+            )
+        console.print(tbl_missing)
+        console.print()
+
+    # ---- Resumo ----
+    console.print(f"[dim]{report.summary()}[/dim]\n")
+
+    # ---- Relatório JSON ----
+    if report_path:
+        report_data = {
+            "checked_tables": report.checked_tables,
+            "existing": report.existing_tables,
+            "missing_source": [
+                {"table": g.table_name, "notebooks": g.notebooks, "suggestion": g.suggestion}
+                for g in report.missing_source
+            ],
+            "missing_upstream": [
+                {
+                    "table": g.table_name,
+                    "notebooks": g.notebooks,
+                    "upstream_notebook": g.upstream_notebook,
+                    "suggestion": g.suggestion,
+                }
+                for g in report.missing_upstream
+            ],
+        }
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(
+            _json.dumps(report_data, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        console.print(f"[green]✓[/green] Relatório salvo em [cyan]{report_path}[/cyan]\n")
+
+    # ---- Decisão de continuar ----
+    if not report.has_ghosts:
+        console.print("[bold green]✓ Todas as tabelas estão disponíveis.[/bold green]")
+        raise typer.Exit(0)
+
+    if yes:
+        console.print(
+            "[yellow]⚠  Tabelas ausentes detectadas — continuando (--yes ativado).[/yellow]"
+        )
+        raise typer.Exit(0)
+
+    # Prompt interativo
+    continuar = typer.confirm(
+        f"  {len(report.ghost_sources)} tabela(s) ausente(s). Continuar com o deploy mesmo assim?",
+        default=False,
+    )
+    if not continuar:
+        console.print("[red]Deploy cancelado.[/red]")
+        raise typer.Exit(1)
+
+    console.print("[yellow]Continuando com tabelas ausentes...[/yellow]")
 
 
 # ---------------------------------------------------------------------------

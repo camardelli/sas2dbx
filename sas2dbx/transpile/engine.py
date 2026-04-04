@@ -12,12 +12,17 @@ from __future__ import annotations
 import datetime
 import logging
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from sas2dbx.analyze.classifier import classify_block
 from sas2dbx.generate.notebook import Cell, CellModel, CellType, NotebookGenerator
+from sas2dbx.ingest.reader import read_sas_file, split_blocks
 from sas2dbx.models.migration_result import JobStatus, MigrationResult, SASOrigin
 from sas2dbx.models.sas_ast import SASBlock, SASFile, Tier
+from sas2dbx.transpile.llm.context import build_context, format_context_for_prompt
+from sas2dbx.transpile.llm.prompts import build_transpile_prompt, strip_code_fences
 from sas2dbx.transpile.llm.validator import validate_pyspark
 from sas2dbx.transpile.state import MigrationStateManager
 
@@ -33,6 +38,8 @@ _SAS_KEYWORD_SKIP: frozenset[str] = frozenset({
     "UPDATE", "INTO", "SET", "OUTPUT", "MERGE", "RETAIN", "KEEP",
     "DROP", "IF", "THEN", "ELSE", "DO", "END", "BY", "ORDER",
 })
+
+_SAS_FUNC_RE = re.compile(r"\b([A-Z][A-Z0-9_]{1,})\s*\(", re.IGNORECASE)
 
 
 class TranspilationEngine:
@@ -57,6 +64,7 @@ class TranspilationEngine:
         catalog: str = "main",
         schema: str = "migrated",
         notebook_format: str = "py",
+        on_progress: Callable[[str, str], None] | None = None,
     ) -> None:
         self._output_dir = output_dir
         self._resume = resume
@@ -67,6 +75,7 @@ class TranspilationEngine:
         self._schema = schema
         self._notebook_format = notebook_format
         self._generator = NotebookGenerator(notebook_format=notebook_format)
+        self._on_progress = on_progress
         self._ks_harvest_baseline: int = 0  # H.3: baseline de _harvest_attempted antes de run()
 
     def run(self, sas_files: list[SASFile], execution_order: list[str]) -> list[MigrationResult]:
@@ -117,6 +126,8 @@ class TranspilationEngine:
                     else 0.0,
                 )
                 results.append(result)
+                if self._on_progress:
+                    self._on_progress(job_id, "skipped")
                 continue
 
             sas_file = file_map.get(job_id)
@@ -124,14 +135,21 @@ class TranspilationEngine:
                 logger.warning("Engine: job '%s' não encontrado em sas_files — pulando", job_id)
                 continue
 
+            if self._on_progress:
+                self._on_progress(job_id, "running")
+
             self._state.mark_started(job_id)
             result = self._transpile_job(job_id, sas_file)
             results.append(result)
 
             if result.status == JobStatus.DONE:
                 self._state.mark_done(job_id, result)
+                if self._on_progress:
+                    self._on_progress(job_id, "done")
             else:
                 self._state.mark_failed(job_id, result.error or "erro desconhecido")
+                if self._on_progress:
+                    self._on_progress(job_id, "failed")
 
         # H.3 — Auto-merge: se on-demand harvests ocorreram, reconstruir merged/
         self._maybe_rebuild_mappings()
@@ -151,11 +169,6 @@ class TranspilationEngine:
           sem LLMClient        → stub com SAS original comentado
         """
         try:
-            from sas2dbx.analyze.classifier import classify_block
-            from sas2dbx.ingest.reader import read_sas_file, split_blocks
-            from sas2dbx.transpile.llm.context import format_context_for_prompt
-            from sas2dbx.transpile.llm.prompts import build_transpile_prompt, strip_code_fences
-
             raw_code, encoding = read_sas_file(sas_file.path)
             sas_file.encoding = encoding
 
@@ -191,9 +204,12 @@ class TranspilationEngine:
 
                 elif self._llm_client is not None:
                     context_text = ""
+                    all_func_names: list[str] = []
+                    ctx: dict = {}
                     if self._knowledge_store is not None:
+                        all_func_names = _extract_sas_func_names(block.raw_code)
                         ctx = self._build_ks_context(
-                            block.raw_code, classification.construct_type
+                            block.raw_code, classification.construct_type, all_func_names
                         )
                         context_text = format_context_for_prompt(ctx)
 
@@ -207,6 +223,17 @@ class TranspilationEngine:
                     response = self._llm_client.complete_sync(prompt)
                     pyspark_code = strip_code_fences(response.content)
                     confidence_scores.append(classification.confidence)
+
+                    # Gap 3 — enriquece KB com funções não encontradas antes da transpilação
+                    if self._knowledge_store is not None and all_func_names:
+                        _known = set(ctx.get("function_mappings", {}).keys())
+                        _unknown = [f for f in all_func_names if f not in _known]
+                        if _unknown:
+                            self._knowledge_store.enrich_from_transpilation(
+                                unknown_funcs=_unknown,
+                                sas_code=block.raw_code,
+                                pyspark_code=pyspark_code,
+                            )
 
                 else:
                     pyspark_code = _stub_block(
@@ -280,9 +307,20 @@ class TranspilationEngine:
                 error=str(exc),
             )
 
-    def _build_ks_context(self, raw_code: str, construct_type: str) -> dict:
-        """Extrai keys relevantes do bloco e consulta o KnowledgeStore."""
-        from sas2dbx.transpile.llm.context import build_context
+    def _build_ks_context(
+        self, raw_code: str, construct_type: str, func_names: list[str] | None = None
+    ) -> dict:
+        """Extrai keys relevantes do bloco e consulta o KnowledgeStore.
+
+        Args:
+            raw_code: Código SAS do bloco.
+            construct_type: Tipo de construto classificado.
+            func_names: Lista pré-computada de funções SAS. Se None, extrai de raw_code.
+                Receber pré-computado evita extração duplicada quando _transpile_job()
+                já precisa da lista para Gap 3.
+        """
+        if func_names is None:
+            func_names = _extract_sas_func_names(raw_code)
 
         proc_names: list[str] = []
         if construct_type.startswith("PROC_"):
@@ -294,13 +332,7 @@ class TranspilationEngine:
                 if kw in raw_code.upper():
                     sql_constructs.append(kw)
 
-        sas_func_re = re.compile(r"\b([A-Z][A-Z0-9_]{1,})\s*\(", re.IGNORECASE)
-        func_names = list({
-            m.group(1).upper()
-            for m in sas_func_re.finditer(raw_code)
-            if m.group(1).upper() not in _SAS_KEYWORD_SKIP
-        })[:15]
-
+        # Passa todas as funções encontradas — build_context aplica token budget via _fits()
         return build_context(
             self._knowledge_store,
             func_names=func_names,
@@ -318,14 +350,15 @@ class TranspilationEngine:
         if self._knowledge_store is None:
             return
 
-        current = len(self._knowledge_store._harvest_attempted)
-        new_harvests = current - self._ks_harvest_baseline
-        if new_harvests <= 0:
+        new_harvests = len(self._knowledge_store._harvest_attempted) - self._ks_harvest_baseline
+        new_enrichments = getattr(self._knowledge_store, "_enriched_count", 0)
+        if new_harvests <= 0 and new_enrichments <= 0:
             return
+        total_new = new_harvests + new_enrichments
 
         logger.info(
-            "Engine: %d on-demand harvest(s) detectados — reconstruindo merged/...",
-            new_harvests,
+            "Engine: %d on-demand harvest(s) + enriquecimento(s) detectados — reconstruindo merged/...",
+            total_new,
         )
         try:
             from sas2dbx.knowledge.populate.normalizer import build_mappings
@@ -341,6 +374,15 @@ class TranspilationEngine:
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
+
+
+def _extract_sas_func_names(raw_code: str) -> list[str]:
+    """Extrai nomes únicos de funções SAS de um bloco (sem keywords SAS)."""
+    return list({
+        u
+        for m in _SAS_FUNC_RE.finditer(raw_code)
+        if (u := m.group(1).upper()) not in _SAS_KEYWORD_SKIP
+    })
 
 
 def _flag_manual_block(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import zipfile
 from pathlib import Path
 
 from sas2dbx.models.sas_ast import SASFile
@@ -12,31 +13,42 @@ logger = logging.getLogger(__name__)
 # Extensões reconhecidas como código SAS
 _SAS_EXTENSIONS = {".sas"}
 
+# Subdiretório onde ZIPs são extraídos dentro de output_dir
+_ZIP_EXTRACT_SUBDIR = "_extracted"
+
 
 def scan_directory(
     path: str | Path,
     recursive: bool = True,
     exclude_patterns: list[str] | None = None,
+    extract_dir: Path | None = None,
 ) -> list[SASFile]:
-    """Escaneia um diretório e retorna lista de arquivos .sas encontrados.
+    """Escaneia um diretório (ou arquivo ZIP) e retorna lista de arquivos .sas.
 
     Args:
-        path: Diretório ou arquivo .sas a escanear.
+        path: Diretório, arquivo .sas único, ou arquivo .zip com jobs SAS.
         recursive: Se True, busca recursivamente em subdiretórios.
         exclude_patterns: Padrões glob a excluir (ex: ["**/test/**", "**/macro_*"]).
+        extract_dir: Diretório onde extrair ZIP. Se None, usa `path.parent/_extracted/`.
+            Ignorado quando path não é ZIP.
 
     Returns:
         Lista de SASFile ordenada por path, vazia se nenhum arquivo encontrado.
 
     Raises:
         FileNotFoundError: Se o path não existe.
-        NotADirectoryError: Se path não é diretório nem arquivo .sas.
+        NotADirectoryError: Se path não é diretório nem arquivo .sas/.zip.
     """
     root = Path(path).resolve()
     exclude_patterns = exclude_patterns or []
 
     if not root.exists():
         raise FileNotFoundError(f"Path não encontrado: {root}")
+
+    # Aceita arquivo ZIP — extrai para extract_dir e escaneia
+    if root.is_file() and root.suffix.lower() == ".zip":
+        dest = extract_dir or (root.parent / _ZIP_EXTRACT_SUBDIR / root.stem)
+        return _scan_zip(root, dest, recursive, exclude_patterns)
 
     # Aceita arquivo único .sas diretamente
     if root.is_file():
@@ -73,6 +85,55 @@ def scan_directory(
         logger.warning("Scanner: nenhum arquivo .sas encontrado em %s", root)
 
     return sas_files
+
+
+def _scan_zip(
+    zip_path: Path,
+    extract_dir: Path,
+    recursive: bool,
+    exclude_patterns: list[str],
+) -> list[SASFile]:
+    """Extrai ZIP para extract_dir (persistente) e escaneia os .sas contidos.
+
+    A extração é idempotente: arquivos já extraídos não são sobrescritos,
+    garantindo que re-runs após interrupção não re-extraiam desnecessariamente.
+
+    Args:
+        zip_path: Arquivo ZIP de entrada.
+        extract_dir: Diretório destino da extração (criado se não existir).
+        recursive: Passado para scan_directory após extração.
+        exclude_patterns: Passado para scan_directory após extração.
+
+    Returns:
+        Lista de SASFile encontrados dentro do ZIP extraído.
+    """
+    extract_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            members = [m for m in zf.infolist() if m.filename.lower().endswith(".sas")]
+            for member in members:
+                dest_file = extract_dir / member.filename
+                if dest_file.exists():
+                    logger.debug("Scanner: %s já extraído — pulando", member.filename)
+                    continue
+                dest_file.parent.mkdir(parents=True, exist_ok=True)
+                dest_file.write_bytes(zf.read(member.filename))
+                logger.debug("Scanner: extraído %s → %s", member.filename, dest_file)
+    except zipfile.BadZipFile as exc:
+        raise ValueError(f"Arquivo ZIP inválido: {zip_path}") from exc
+
+    extracted_count = len(members)
+    logger.info(
+        "Scanner: ZIP '%s' → %d arquivo(s) .sas extraído(s) em %s",
+        zip_path.name, extracted_count, extract_dir,
+    )
+
+    if not extracted_count:
+        logger.warning("Scanner: nenhum arquivo .sas encontrado dentro de %s", zip_path.name)
+        return []
+
+    return scan_directory(extract_dir, recursive=recursive, exclude_patterns=exclude_patterns)
 
 
 def _make_sas_file(path: Path) -> SASFile:

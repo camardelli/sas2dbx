@@ -14,9 +14,20 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+class TableCategory(str, Enum):
+    """Categoria de uma tabela ausente no catálogo Databricks."""
+
+    EXISTS = "exists"
+    MISSING_SOURCE = "missing_source"
+    """Tabela de origem (LIBNAME SAS) — requer ingestão de dados manual."""
+    MISSING_UPSTREAM = "missing_upstream"
+    """Tabela intermediária — deve ser criada por notebook upstream na DAG."""
 
 # Padrões de leitura de tabelas nos notebooks gerados
 _RE_READ_TABLE = re.compile(
@@ -40,6 +51,9 @@ class GhostSource:
     table_name: str
     notebooks: list[str] = field(default_factory=list)
     suggestion: str = ""
+    category: TableCategory = TableCategory.MISSING_SOURCE
+    upstream_notebook: str | None = None
+    """Nome do notebook upstream que deveria criar esta tabela (sem extensão)."""
 
 
 @dataclass
@@ -47,6 +61,7 @@ class PreflightReport:
     """Resultado do preflight check."""
 
     ghost_sources: list[GhostSource] = field(default_factory=list)
+    existing_tables: list[str] = field(default_factory=list)
     checked_tables: int = 0
     skipped: bool = False
     skip_reason: str = ""
@@ -55,16 +70,28 @@ class PreflightReport:
     def has_ghosts(self) -> bool:
         return len(self.ghost_sources) > 0
 
+    @property
+    def missing_source(self) -> list[GhostSource]:
+        return [g for g in self.ghost_sources if g.category == TableCategory.MISSING_SOURCE]
+
+    @property
+    def missing_upstream(self) -> list[GhostSource]:
+        return [g for g in self.ghost_sources if g.category == TableCategory.MISSING_UPSTREAM]
+
     def summary(self) -> str:
         if self.skipped:
             return f"Preflight ignorado: {self.skip_reason}"
         if not self.has_ghosts:
-            return f"{self.checked_tables} tabela(s) verificada(s) — nenhuma fonte fantasma"
-        names = ", ".join(g.table_name for g in self.ghost_sources[:3])
-        suffix = f" e mais {len(self.ghost_sources) - 3}" if len(self.ghost_sources) > 3 else ""
+            return f"{self.checked_tables} tabela(s) verificada(s) — nenhuma ausente"
+        parts = []
+        if self.missing_source:
+            parts.append(f"{len(self.missing_source)} source ausente(s)")
+        if self.missing_upstream:
+            parts.append(f"{len(self.missing_upstream)} upstream ausente(s)")
         return (
             f"{self.checked_tables} verificada(s) · "
-            f"{len(self.ghost_sources)} fonte(s) fantasma: {names}{suffix}"
+            f"{len(self.existing_tables)} existente(s) · "
+            + " · ".join(parts)
         )
 
 
@@ -75,7 +102,7 @@ class PreflightChecker:
         config: DatabricksConfig com credenciais e catálogo alvo.
     """
 
-    def __init__(self, config) -> None:
+    def __init__(self, config=None) -> None:
         self._config = config
 
     def check(self, output_dir: Path) -> PreflightReport:
@@ -115,7 +142,9 @@ class PreflightChecker:
             )
             for table_name, nbs in sorted(table_to_notebooks.items()):
                 exists = self._table_exists(client, table_name)
-                if not exists:
+                if exists:
+                    report.existing_tables.append(table_name)
+                else:
                     suggestion = self._suggest_action(table_name)
                     report.ghost_sources.append(
                         GhostSource(
@@ -141,7 +170,48 @@ class PreflightChecker:
                 skip_reason=f"falha na conexão Databricks: {type(exc).__name__}",
             )
 
+        # Categoriza tabelas ausentes: upstream (criadas por notebook irmão) vs source
+        if report.ghost_sources:
+            self._categorize_ghosts(report.ghost_sources, notebooks)
+
         return report
+
+    def _categorize_ghosts(
+        self, ghosts: list[GhostSource], notebooks: list[Path]
+    ) -> None:
+        """Classifica cada tabela ausente como MISSING_SOURCE ou MISSING_UPSTREAM.
+
+        Uma tabela é MISSING_UPSTREAM se algum notebook irmão contiver
+        saveAsTable("...{table_short}...") — ou seja, deveria tê-la criado.
+        """
+        # Monta mapa: table_short → notebook que a cria
+        _save_pattern_tmpl = re.compile(
+            r'saveAsTable\(\s*["\']([^"\']+)["\']\s*\)',
+            re.IGNORECASE,
+        )
+        writes: dict[str, str] = {}  # table_short → notebook stem
+        for nb in notebooks:
+            try:
+                content = nb.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            for m in _save_pattern_tmpl.finditer(content):
+                full_name = m.group(1).strip("`\"'")
+                short = full_name.split(".")[-1].lower()
+                writes[short] = nb.stem
+                writes[full_name.lower()] = nb.stem
+
+        for ghost in ghosts:
+            short = ghost.table_name.split(".")[-1].lower()
+            upstream = writes.get(short) or writes.get(ghost.table_name.lower())
+            if upstream:
+                ghost.category = TableCategory.MISSING_UPSTREAM
+                ghost.upstream_notebook = upstream
+                ghost.suggestion = (
+                    f"Tabela intermediária — execute '{upstream}' antes deste job"
+                )
+            else:
+                ghost.category = TableCategory.MISSING_SOURCE
 
     # ------------------------------------------------------------------
     # Internal

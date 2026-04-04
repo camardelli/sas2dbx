@@ -35,8 +35,8 @@ SUPPORTED_CONSTRUCTS: dict[str, Tier] = {
     "MACRO_INVOCATION": Tier.LLM,
     # Tier 2 — LLM-assisted (adicionados)
     "PROC_TRANSPOSE": Tier.LLM,      # pivot/unpivot → stack() / selectExpr()
-    "PROC_REPORT": Tier.LLM,         # relatório tabular → display() + saveAsTable()
-    "HASH_OBJECT": Tier.LLM,         # lookup rápido → broadcast join
+    "PROC_REPORT": Tier.MANUAL,       # relatório tabular — flag manual (sugestão: SQL Dashboard)
+    "HASH_OBJECT": Tier.MANUAL,       # lookup rápido — flag manual (sugestão: broadcast join)
     # Tier 3 — manual flag (sem transpilação automática, preserva SAS original)
     "PROC_FORMAT": Tier.MANUAL,
     "PROC_TABULATE": Tier.MANUAL,

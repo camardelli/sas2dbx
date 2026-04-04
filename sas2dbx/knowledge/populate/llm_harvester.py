@@ -530,6 +530,40 @@ Responda APENAS com o YAML.""",
 }
 
 
+# Prompt para harvest em batch com contexto de transpilação real (Gap 3)
+_CONTEXT_HARVEST_PROMPT = """\
+Você é um especialista em migração SAS para PySpark/Databricks.
+
+O bloco SAS abaixo foi transpilado para PySpark. Usando essa transpilação como \
+contexto, gere mapeamentos YAML para as funções SAS listadas que aparecem no código.
+
+FUNÇÕES A MAPEAR: {func_list}
+
+CÓDIGO SAS ORIGINAL:
+```sas
+{sas_code}
+```
+
+CÓDIGO PYSPARK GERADO:
+```python
+{pyspark_code}
+```
+
+Para CADA função listada, gere uma entrada no formato exato:
+```yaml
+NOME_FUNCAO:
+  pyspark: "expressão PySpark equivalente (use {{col}}, {{arg1}} como placeholders)"
+  notes: "diferenças de comportamento, ordem de args, NULL handling"
+  confidence: 0.85
+```
+
+Regras:
+- Inclua APENAS as funções listadas em FUNÇÕES A MAPEAR
+- Se a função não tem equivalente direto, use confidence < 0.5 e explique em notes
+- Base a equivalência no que você vê no código PySpark gerado
+- Responda APENAS com o bloco YAML, sem texto adicional"""
+
+
 # ---------------------------------------------------------------------------
 # LLMSingleHarvester — harvest de uma entrada por vez (on-demand)
 # ---------------------------------------------------------------------------
@@ -584,6 +618,99 @@ class LLMSingleHarvester:
         response = await self._llm.complete(prompt)  # type: ignore[attr-defined]
 
         return self._parse_single_response(response.content, key, category)
+
+    def harvest_from_context_sync(
+        self,
+        func_names: list[str],
+        sas_code: str,
+        pyspark_code: str,
+    ) -> dict[str, dict | None]:
+        """Versão síncrona de harvest_from_context().
+
+        Usa o contexto real de uma transpilação (código SAS + PySpark gerado)
+        para inferir mapeamentos de múltiplas funções em uma única chamada LLM.
+
+        Args:
+            func_names: Funções SAS a mapear (desconhecidas na KB).
+            sas_code: Código SAS original do bloco transpilado.
+            pyspark_code: Código PySpark gerado pela transpilação.
+
+        Returns:
+            Dict {func_name → entry_dict} — entry_dict pode ser None se não mapeado.
+        """
+        return _run_sync(
+            self.harvest_from_context(
+                func_names=func_names,
+                sas_code=sas_code,
+                pyspark_code=pyspark_code,
+            )
+        )
+
+    async def harvest_from_context(
+        self,
+        func_names: list[str],
+        sas_code: str,
+        pyspark_code: str,
+    ) -> dict[str, dict | None]:
+        """Extrai mapeamentos de funções SAS usando contexto de transpilação real.
+
+        Uma única chamada LLM para múltiplas funções, com contexto rico:
+        o LLM vê como as funções foram efetivamente usadas no código SAS e
+        qual foi o equivalente PySpark gerado — resultado mais preciso que
+        o harvest standalone (que não tem contexto de uso).
+
+        Args:
+            func_names: Funções SAS a mapear.
+            sas_code: Bloco SAS original (contexto de uso).
+            pyspark_code: PySpark gerado (contexto do equivalente).
+
+        Returns:
+            Dict {func_name_upper → entry_dict | None}.
+        """
+        if not func_names:
+            return {}
+
+        # Trunca código para não exceder context window do LLM
+        sas_snippet = sas_code[:1500] if len(sas_code) > 1500 else sas_code
+        py_snippet = pyspark_code[:1500] if len(pyspark_code) > 1500 else pyspark_code
+        func_list_str = ", ".join(func_names[:20])  # máx 20 funções por chamada
+
+        prompt = _CONTEXT_HARVEST_PROMPT.format(
+            func_list=func_list_str,
+            sas_code=sas_snippet,
+            pyspark_code=py_snippet,
+        )
+
+        try:
+            response = await self._llm.complete(prompt)  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("LLMSingleHarvester.harvest_from_context: LLM call falhou: %s", exc)
+            return {}
+
+        raw = self._try_parse_yaml(self._strip_fences(response.content))
+        if not raw:
+            logger.warning(
+                "LLMSingleHarvester.harvest_from_context: YAML inválido para %s", func_names
+            )
+            return {}
+
+        results: dict[str, dict | None] = {}
+        for func_name in func_names:
+            key = func_name.upper()
+            entry = raw.get(key) or raw.get(func_name)
+            if isinstance(entry, dict) and {"pyspark", "notes", "confidence"} <= entry.keys():
+                conf = entry.get("confidence")
+                if isinstance(conf, (int, float)) and 0.0 <= conf <= 1.0:
+                    results[key] = entry
+                    continue
+            results[key] = None  # inválido ou ausente — será registrado como failure
+
+        logger.debug(
+            "LLMSingleHarvester.harvest_from_context: %d/%d funções mapeadas",
+            sum(1 for v in results.values() if v is not None),
+            len(func_names),
+        )
+        return results
 
     def _parse_single_response(
         self, content: str, key: str, category: str

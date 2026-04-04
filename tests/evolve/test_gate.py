@@ -45,9 +45,22 @@ class TestQualityGateDecisions:
         self.gate = QualityGate(project_root=Path("/tmp"), test_timeout=30)
 
     def test_reject_without_test(self):
-        proposal = _make_proposal(test=None)
+        # Cria proposta sem teste diretamente (sem usar _make_proposal que preenche default)
+        from sas2dbx.evolve.agent import FileModification
+        proposal = EvolutionProposal(
+            fix_type="knowledge_store",
+            risk_level="low",
+            description="Test proposal sem teste",
+            files_to_modify=[
+                FileModification(
+                    path="knowledge/mappings/generated/functions_map.yaml",
+                    action="append",
+                    content="TEST_FN:\n  pyspark: regexp_extract\n  confidence: 0.9",
+                    reason="Test fix",
+                )
+            ],
+        )
         result = self.gate.evaluate(proposal)
-        assert result.decision == "REJECT"
         assert result.decision == "REJECT"
         assert "sem teste" in result.reason.lower() or "test" in result.reason.lower()
 
@@ -103,7 +116,8 @@ class TestQualityGateDecisions:
         proposal = _make_proposal(risk_level="low")
 
         with patch.object(
-            self.gate, "_run_tests", return_value={"passed": True, "output": "1 passed"}
+            self.gate, "_run_tests",
+            return_value={"passed": True, "output": "1 passed", "failed_tests": set()},
         ):
             with patch.object(
                 self.gate,
@@ -130,7 +144,8 @@ class TestQualityGateDecisions:
         )
 
         with patch.object(
-            self.gate, "_run_tests", return_value={"passed": True, "output": "1 passed"}
+            self.gate, "_run_tests",
+            return_value={"passed": True, "output": "1 passed", "failed_tests": set()},
         ):
             with patch.object(
                 self.gate,
@@ -141,25 +156,36 @@ class TestQualityGateDecisions:
         assert result.decision == "APPROVE_NOTIFY"
         assert result.approved
 
-    def test_reject_when_existing_tests_fail(self):
-        """Se os testes existentes falham antes do fix, rejeita."""
+    def test_baseline_failures_captured_for_delta(self):
+        """Falhas pré-existentes são capturadas mas não bloqueiam gate (delta comparison).
+
+        Gate usa comparação delta: aceita se sandbox não introduz NOVAS falhas.
+        Testes já quebrados na baseline não contam como regressão do fix.
+        """
         proposal = _make_proposal()
+        pre_failures = {"tests/some/test_old.py::test_broken"}
 
         with patch.object(
             self.gate,
             "_run_tests",
-            return_value={"passed": False, "output": "3 failed"},
+            return_value={"passed": False, "output": "1 failed", "failed_tests": pre_failures},
         ):
-            result = self.gate.evaluate(proposal)
-        assert result.decision == "REJECT"
-        assert "instável" in result.reason.lower()
+            with patch.object(
+                self.gate,
+                "_run_in_sandbox",
+                return_value={"passed": True, "output": "1 passed"},
+            ):
+                result = self.gate.evaluate(proposal)
+        # Delta = 0: mesmas falhas pré-existentes, sandbox não introduziu novas
+        assert result.decision == "APPROVE"
 
     def test_reject_when_sandbox_tests_fail(self):
         """Se sandbox falha, rejeita mesmo que testes existentes passem."""
         proposal = _make_proposal()
 
         with patch.object(
-            self.gate, "_run_tests", return_value={"passed": True, "output": "ok"}
+            self.gate, "_run_tests",
+            return_value={"passed": True, "output": "ok", "failed_tests": set()},
         ):
             with patch.object(
                 self.gate,

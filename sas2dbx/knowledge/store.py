@@ -52,6 +52,10 @@ class KnowledgeStore:
         self._cache: dict[str, dict] = {}  # lazy cache: path_str → parsed YAML
         self._llm_client = llm_client
         self._harvest_attempted: set[str] = set()  # cache de negativas por sessão
+        self._ref_cache: dict[str, str | None] = {}    # cache memória para get_reference()
+        self._single_harvester: object | None = None   # instância cacheada de LLMSingleHarvester
+        self._harvest_failures: set[str] | None = None # lazy-loaded do disco
+        self._enriched_count: int = 0                  # contagem de enriquecimentos pós-transpilação
 
     # -------------------------------------------------------------------------
     # Lookup — deterministic, no LLM
@@ -143,6 +147,7 @@ class KnowledgeStore:
     def get_reference(self, source: str, category: str, name: str) -> str | None:
         """
         Retrieve a markdown reference doc for context injection into LLM prompts.
+        Cache em memória: cada arquivo .md é lido do disco apenas uma vez por sessão.
 
         Args:
             source: 'sas' | 'pyspark'
@@ -160,11 +165,14 @@ class KnowledgeStore:
             logger.warning("Unknown reference source: %r. Use 'sas' or 'pyspark'.", source)
             return None
 
-        if ref_path.exists():
-            return ref_path.read_text(encoding="utf-8")
-
-        logger.debug("Reference not found: %s", ref_path)
-        return None
+        cache_key = f"{source}/{category}/{name}"
+        if cache_key not in self._ref_cache:
+            self._ref_cache[cache_key] = (
+                ref_path.read_text(encoding="utf-8") if ref_path.exists() else None
+            )
+            if self._ref_cache[cache_key] is None:
+                logger.debug("Reference not found: %s", ref_path)
+        return self._ref_cache[cache_key]
 
     # -------------------------------------------------------------------------
     # Custom environment
@@ -270,6 +278,7 @@ class KnowledgeStore:
     def invalidate_cache(self) -> None:
         """Limpa o cache em memória. Usar após build-mappings ou edição manual dos YAMLs."""
         self._cache.clear()
+        self._ref_cache.clear()
 
     # -------------------------------------------------------------------------
     # Internal — on-demand harvest (H.2)
@@ -300,21 +309,28 @@ class KnowledgeStore:
 
         self._harvest_attempted.add(cache_key)
 
+        # Gap 2 — verifica se já foi tentado e confirmado sem equivalência
+        if cache_key in self._load_harvest_failures():
+            logger.debug(
+                "KnowledgeStore: %s '%s' está em harvest_failures — pulando LLM call",
+                category, key,
+            )
+            return None
+
         logger.info(
             "KnowledgeStore: on-demand harvest para %s '%s'...", category, key
         )
 
         try:
-            from sas2dbx.knowledge.populate.llm_harvester import LLMSingleHarvester
-
-            harvester = LLMSingleHarvester(self._llm_client)
+            harvester = self._get_single_harvester()
             entry = harvester.harvest_single_sync(category=category, key=key)
 
             if entry is None:
                 logger.warning(
-                    "KnowledgeStore: on-demand harvest retornou None para %s '%s'",
+                    "KnowledgeStore: on-demand harvest retornou None para %s '%s' — registrando failure",
                     category, key,
                 )
+                self._record_harvest_failure(cache_key)
                 return None
 
             self._append_to_generated(filename, key, entry)
@@ -371,6 +387,164 @@ class KnowledgeStore:
             )
         os.replace(tmp, path)
 
+    def _get_single_harvester(self) -> object:
+        """Retorna instância cacheada de LLMSingleHarvester (criada uma vez por sessão)."""
+        if self._single_harvester is None:
+            from sas2dbx.knowledge.populate.llm_harvester import LLMSingleHarvester
+            self._single_harvester = LLMSingleHarvester(self._llm_client)
+        return self._single_harvester
+
+    # ------------------------------------------------------------------
+    # Gap 2 — Harvest failure persistence
+    # ------------------------------------------------------------------
+
+    _FAILURES_FILENAME = "harvest_no_mapping.yaml"
+
+    def _load_harvest_failures(self) -> set[str]:
+        """Carrega (lazy) o conjunto de chaves sem equivalência conhecida.
+
+        Retorna set de strings no formato "category:KEY" (ex: "function:PRXMATCH").
+        Falhas são persistidas em generated/harvest_no_mapping.yaml.
+        """
+        if self._harvest_failures is not None:
+            return self._harvest_failures
+
+        failures_path = self._mappings_generated / self._FAILURES_FILENAME
+        if not failures_path.exists():
+            self._harvest_failures = set()
+            return self._harvest_failures
+
+        try:
+            import yaml
+            data = yaml.safe_load(failures_path.read_text(encoding="utf-8")) or {}
+            self._harvest_failures = set(data.keys())
+        except Exception:  # noqa: BLE001
+            self._harvest_failures = set()
+
+        logger.debug(
+            "KnowledgeStore: %d chave(s) em harvest_failures carregadas",
+            len(self._harvest_failures),
+        )
+        return self._harvest_failures
+
+    def _record_harvest_failure(self, cache_key: str) -> None:
+        """Persiste uma chave sem equivalência em generated/harvest_no_mapping.yaml.
+
+        Próximas sessões vão pular o LLM call para esta chave imediatamente.
+        """
+        import datetime as _dt
+        import yaml
+
+        self._load_harvest_failures()  # garante que self._harvest_failures está carregado
+        if cache_key in self._harvest_failures:
+            return  # já registrado
+
+        self._harvest_failures.add(cache_key)
+
+        failures_path = self._mappings_generated / self._FAILURES_FILENAME
+        failures_path.parent.mkdir(parents=True, exist_ok=True)
+
+        existing: dict = {}
+        if failures_path.exists():
+            try:
+                loaded = yaml.safe_load(failures_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    existing = loaded
+            except Exception:  # noqa: BLE001
+                pass
+
+        existing[cache_key] = {"recorded_at": _dt.datetime.now(tz=_dt.timezone.utc).isoformat()}
+
+        tmp = failures_path.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            yaml.dump(existing, f, default_flow_style=False, allow_unicode=True, sort_keys=True)
+        import os
+        os.replace(tmp, failures_path)
+
+        logger.info(
+            "KnowledgeStore: failure registrado para '%s' em %s",
+            cache_key, failures_path.name,
+        )
+
+    # ------------------------------------------------------------------
+    # Gap 3 — Enriquecimento pós-transpilação
+    # ------------------------------------------------------------------
+
+    def enrich_from_transpilation(
+        self,
+        unknown_funcs: list[str],
+        sas_code: str,
+        pyspark_code: str,
+    ) -> int:
+        """Enriquece a KB com funções SAS desconhecidas usando contexto da transpilação.
+
+        Diferente do on-demand harvest (uma função por vez, sem contexto), este método
+        envia UMA chamada LLM em batch com o código SAS original + PySpark gerado,
+        permitindo ao LLM inferir mapeamentos com contexto real de uso.
+
+        Args:
+            unknown_funcs: Funções SAS não encontradas na KB antes da transpilação.
+            sas_code: Bloco SAS original.
+            pyspark_code: Código PySpark gerado pela transpilação.
+
+        Returns:
+            Número de entradas adicionadas à KB.
+        """
+        if self._llm_client is None or not unknown_funcs:
+            return 0
+
+        failures = self._load_harvest_failures()
+        # Filtra funções já tentadas (nesta sessão ou em sessões anteriores)
+        to_enrich = [
+            f for f in unknown_funcs
+            if f"function:{f}" not in self._harvest_attempted
+            and f"function:{f}" not in failures
+        ]
+        if not to_enrich:
+            return 0
+
+        logger.info(
+            "KnowledgeStore: enriquecimento pós-transpilação para %d função(ões): %s",
+            len(to_enrich), ", ".join(to_enrich[:8]),
+        )
+
+        try:
+            harvester = self._get_single_harvester()
+            entries = harvester.harvest_from_context_sync(
+                func_names=to_enrich,
+                sas_code=sas_code,
+                pyspark_code=pyspark_code,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("KnowledgeStore: enriquecimento falhou: %s", exc)
+            return 0
+
+        added = 0
+        for func_name, entry in (entries or {}).items():
+            cache_key = f"function:{func_name.upper()}"
+            self._harvest_attempted.add(cache_key)
+            if entry is not None:
+                self._append_to_generated("functions_map.yaml", func_name.upper(), entry)
+                added += 1
+                logger.debug("KnowledgeStore: enriquecimento OK — %s", func_name)
+            else:
+                self._record_harvest_failure(cache_key)
+
+        # Funções em to_enrich que não apareceram na resposta do LLM
+        returned_keys = {k.upper() for k in (entries or {})}
+        for func_name in to_enrich:
+            if func_name.upper() not in returned_keys:
+                self._record_harvest_failure(f"function:{func_name.upper()}")
+
+        if added > 0:
+            self.invalidate_cache()
+            self._enriched_count += added
+            logger.info(
+                "KnowledgeStore: %d função(ões) adicionada(s) à KB via enriquecimento", added
+            )
+
+        return added
+
     async def _on_demand_harvest_async(
         self,
         category: str,
@@ -390,21 +564,28 @@ class KnowledgeStore:
 
         self._harvest_attempted.add(cache_key)
 
+        # Gap 2 — verifica failures persistidos
+        if cache_key in self._load_harvest_failures():
+            logger.debug(
+                "KnowledgeStore: %s '%s' está em harvest_failures — pulando LLM call",
+                category, key,
+            )
+            return None
+
         logger.info(
             "KnowledgeStore: async harvest para %s '%s'...", category, key
         )
 
         try:
-            from sas2dbx.knowledge.populate.llm_harvester import LLMSingleHarvester
-
-            harvester = LLMSingleHarvester(self._llm_client)
+            harvester = self._get_single_harvester()
             entry = await harvester.harvest_single(category=category, key=key)
 
             if entry is None:
                 logger.warning(
-                    "KnowledgeStore: async harvest retornou None para %s '%s'",
+                    "KnowledgeStore: async harvest retornou None para %s '%s' — registrando failure",
                     category, key,
                 )
+                self._record_harvest_failure(cache_key)
                 return None
 
             self._append_to_generated(filename, key, entry)

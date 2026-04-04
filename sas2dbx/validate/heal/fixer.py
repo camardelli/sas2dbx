@@ -95,7 +95,7 @@ class NotebookFixer:
         fix_key = diagnostic.deterministic_fix
         if not fix_key or fix_key not in _HANDLERS:
             # Tenta extrair entidades da mensagem de erro bruta antes de desistir
-            raw_msg = getattr(diagnostic, "raw_error", "") or ""
+            raw_msg = getattr(diagnostic, "error_raw", "") or ""
             if raw_msg and fix_key == "fix_unresolved_column":
                 logger.debug("Fixer: tentando extrair entidades de raw_error para fix_unresolved_column")
             else:
@@ -522,55 +522,71 @@ class NotebookFixer:
         re.IGNORECASE,
     )
 
+    # Regex para extrair pares (alias, colname) de uma lista de sugestões Databricks
+    # Ex: "`c`.`meses_ativo`, `u`.`id`" → [("c", "meses_ativo"), ("u", "id")]
+    _SUGGESTION_RE = re.compile(r'`?(\w+)`?\s*\.\s*`?(\w+)`?')
+
+    def _pick_best_suggestion(
+        self, suggestions_raw: str, table_alias: str, unresolved: str
+    ) -> str | None:
+        """Escolhe a melhor sugestão da lista fornecida pelo Databricks.
+
+        Prefere sugestões do mesmo alias de tabela que a coluna não resolvida.
+        Rejeita sugestões genéricas (id, key, num, etc.) e muito curtas.
+        """
+        _GENERIC_COLUMNS = {"id", "key", "row", "idx", "num", "val", "col", "name"}
+
+        candidates: list[str] = []
+        for m in self._SUGGESTION_RE.finditer(suggestions_raw):
+            alias, colname = m.group(1), m.group(2)
+            if len(colname) <= 3 or colname.lower() in _GENERIC_COLUMNS:
+                continue
+            if colname.lower() == unresolved.lower():
+                continue  # não substituir por ela mesma
+            # Prioriza sugestões do mesmo alias
+            if alias == table_alias:
+                candidates.insert(0, colname)
+            else:
+                candidates.append(colname)
+
+        return candidates[0] if candidates else None
+
     def _fix_unresolved_column(
         self, notebook_path: Path, entities: dict[str, str]
     ) -> str:
         """Handler para category='unresolved_column_suggestion'.
 
         Substitui a referência à coluna não resolvida pela sugestão do Databricks.
-        Cobre o padrão LLM de placeholder: ORDER_COL = "coluna_xxx" quando o LLM
-        não sabia qual coluna usar para ordenação.
-
-        Usa a sugestão extraída da mensagem de erro do Databricks para garantir
-        que a substituição seja para uma coluna que realmente existe na tabela.
+        Chaves de entidade produzidas por patterns.py:
+          - bad_column: nome da coluna não resolvida (sem alias)
+          - table_alias: alias da tabela (ex: "c" em "c.fl_ativo")
+          - suggestions: lista de sugestões do Databricks (string raw)
         """
-        unresolved = entities.get("unresolved_column")
-        suggested = entities.get("suggested_column")
+        # Suporta tanto as chaves de patterns.py quanto as legadas
+        unresolved = entities.get("bad_column") or entities.get("unresolved_column")
+        table_alias = entities.get("table_alias", "")
+        suggestions_raw = entities.get("suggestions", "")
+        suggested = (
+            entities.get("suggested_column")
+            or self._pick_best_suggestion(suggestions_raw, table_alias, unresolved or "")
+        )
 
-        if not unresolved or not suggested:
-            return "Coluna não resolvida ou sugestão não identificada na mensagem de erro"
+        if not unresolved:
+            return "Coluna não resolvida não identificada na mensagem de erro"
 
-        # Caso especial: Databricks sugere '_placeholder' → a tabela foi criada pelo
-        # self-healing com schema mínimo (id, _placeholder). Adiciona a coluna
-        # faltante via ALTER TABLE em todas as placeholders encontradas no notebook.
+        if not suggested:
+            return f"Nenhuma sugestão válida para '{unresolved}' — revisão manual necessária"
+
+        # Caso especial: Databricks sugere '_placeholder' → schema mínimo
         if suggested == "_placeholder":
             return self._fix_placeholder_add_column(notebook_path, unresolved)
 
-        # Rejeita substituições perigosas: sugestão muito curta (≤3 chars) ou
-        # nome genérico que indica falso positivo do "Did you mean" do Databricks.
-        # Sugestão genérica como "id" quase sempre significa que a tabela placeholder
-        # foi criada com schema mínimo — a coluna faltante deve ser ADICIONADA via
-        # ALTER TABLE, não substituída.
+        # Rejeita substituições genéricas (id, key, etc.)
         _GENERIC_COLUMNS = {"id", "key", "row", "idx", "num", "val", "col", "name"}
         if len(suggested) <= 3 or suggested.lower() in _GENERIC_COLUMNS:
             logger.warning(
                 "NotebookFixer._fix_unresolved_column: sugestão '%s' rejeitada "
-                "(muito genérica para substituir '%s' com segurança) — tentando ALTER TABLE",
-                suggested,
-                unresolved,
-            )
-            return self._fix_placeholder_add_column(notebook_path, unresolved)
-
-        # Rejeita quando a sugestão remove semântica de negócio:
-        # se o nome original tem prefixo de domínio (cd_, fl_, vl_, nm_, qt_, dt_)
-        # e a sugestão não, é um falso positivo. Tenta ALTER TABLE como fallback.
-        _DOMAIN_PREFIXES = ("cd_", "fl_", "vl_", "nm_", "qt_", "dt_", "id_", "tp_", "ds_")
-        original_has_domain = any(unresolved.lower().startswith(p) for p in _DOMAIN_PREFIXES)
-        suggested_has_domain = any(suggested.lower().startswith(p) for p in _DOMAIN_PREFIXES)
-        if original_has_domain and not suggested_has_domain:
-            logger.warning(
-                "NotebookFixer._fix_unresolved_column: sugestão '%s' rejeitada "
-                "(perde prefixo de domínio de '%s') — tentando ALTER TABLE",
+                "(muito genérica para substituir '%s') — tentando ALTER TABLE",
                 suggested,
                 unresolved,
             )
@@ -578,43 +594,50 @@ class NotebookFixer:
 
         content = notebook_path.read_text(encoding="utf-8")
 
-        # Substitui todas as ocorrências da coluna não resolvida entre aspas
-        # e como referência F.col() no notebook
+        # Tenta substituição simples (coluna sem alias prefix): "fl_ativo" → "meses_ativo"
         old_quoted = f'"{unresolved}"'
         new_quoted = f'"{suggested}"'
         old_quoted_single = f"'{unresolved}'"
         new_quoted_single = f"'{suggested}'"
 
-        if old_quoted not in content and old_quoted_single not in content:
-            # Verifica se a coluna aparece com alias prefix (ex: "c.dt_ativacao").
-            # Nesse caso a substituição de texto simples não funciona — usa D3 (withColumn).
-            alias_re = re.compile(rf'["\'](?:\w+\.){re.escape(unresolved)}["\']')
-            if alias_re.search(content):
-                logger.info(
-                    "NotebookFixer._fix_unresolved_column: '%s' encontrada com alias prefix "
-                    "— redirecionando para D3 (withColumn em tabelas externas)",
-                    unresolved,
+        if old_quoted in content or old_quoted_single in content:
+            # Segurança: não substituir se a sugestão já existe no notebook
+            if f'"{suggested}"' in content or f"'{suggested}'" in content:
+                logger.warning(
+                    "NotebookFixer._fix_unresolved_column: sugestão '%s' já existe "
+                    "— redirecionando para D3",
+                    suggested,
                 )
                 return self._fix_placeholder_add_column(notebook_path, unresolved)
-            return f"Coluna '{unresolved}' não encontrada no notebook"
-
-        # Segurança: se a coluna sugerida já existe no notebook, substituir criaria
-        # duplicatas no mesmo SELECT/DataFrame → COLUMN_ALREADY_EXISTS.
-        # Nesse caso, adiciona a coluna faltante via D3 em vez de substituir.
-        suggested_quoted = f'"{suggested}"'
-        suggested_quoted_single = f"'{suggested}'"
-        if suggested_quoted in content or suggested_quoted_single in content:
-            logger.warning(
-                "NotebookFixer._fix_unresolved_column: sugestão '%s' já existe no notebook "
-                "— substituir criaria COLUMN_ALREADY_EXISTS; redirecionando para D3",
-                suggested,
+            count = content.count(old_quoted) + content.count(old_quoted_single)
+            new_content = (
+                content.replace(old_quoted, new_quoted).replace(old_quoted_single, new_quoted_single)
             )
-            return self._fix_placeholder_add_column(notebook_path, unresolved)
+            notebook_path.write_text(new_content, encoding="utf-8")
+            return f"Coluna '{unresolved}' → '{suggested}' em {count} ocorrência(s)"
 
-        count = content.count(old_quoted) + content.count(old_quoted_single)
-        new_content = content.replace(old_quoted, new_quoted).replace(old_quoted_single, new_quoted_single)
-        notebook_path.write_text(new_content, encoding="utf-8")
-        return f"Coluna '{unresolved}' → '{suggested}' em {count} ocorrência(s) (sugestão Databricks)"
+        # Tenta substituição com alias prefix: "alias.fl_ativo" → "alias.meses_ativo"
+        # Cobre referências do tipo F.col("c.fl_ativo") geradas pelo LLM com alias de JOIN
+        alias_col_re = re.compile(
+            rf'(["\'])(?P<alias>\w+)\.{re.escape(unresolved)}\1'
+        )
+        if alias_col_re.search(content):
+            alias_for_sub = table_alias or alias_col_re.search(content).group("alias")
+            old_alias_d = f'"{alias_for_sub}.{unresolved}"'
+            old_alias_s = f"'{alias_for_sub}.{unresolved}'"
+            new_alias_d = f'"{alias_for_sub}.{suggested}"'
+            new_alias_s = f"'{alias_for_sub}.{suggested}'"
+            count = content.count(old_alias_d) + content.count(old_alias_s)
+            new_content = (
+                content.replace(old_alias_d, new_alias_d).replace(old_alias_s, new_alias_s)
+            )
+            notebook_path.write_text(new_content, encoding="utf-8")
+            return (
+                f"Coluna '{alias_for_sub}.{unresolved}' → '{alias_for_sub}.{suggested}'"
+                f" em {count} ocorrência(s) (sugestão Databricks)"
+            )
+
+        return f"Coluna '{unresolved}' não encontrada no notebook"
 
     @staticmethod
     def _is_table_owned(content: str, table_name: str) -> bool:
