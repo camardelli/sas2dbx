@@ -26,6 +26,7 @@ _HANDLERS: dict[str, str] = {
     "fix_function_not_found": "_fix_function_not_found",
     "fix_parse_syntax_if_not_exists": "_fix_parse_syntax_if_not_exists",
     "fix_rdd_flatmap": "_fix_rdd_flatmap",
+    "fix_output_column_exists": "_fix_output_column_exists",
 }
 
 # Mapeamento de funções SQL SAS/não-suportadas → equivalente Spark SQL.
@@ -1188,3 +1189,69 @@ class NotebookFixer:
 
         notebook_path.write_text(new_content2, encoding="utf-8")
         return f"Substituído .rdd.flatMap por list comprehension em {len(matches)} local(is) — serverless-safe"
+
+    def _fix_output_column_exists(
+        self, notebook_path: Path, entities: dict[str, str]
+    ) -> str:
+        """Handler para category='output_column_exists'.
+
+        Erro: IllegalArgumentException: Output column <col> already exists.
+        Causa: StringIndexer/VectorAssembler ou withColumn tentando criar coluna
+        que já existe no DataFrame.
+
+        Fix:
+          - withColumn("col", ...) → drop("col").withColumn("col", ...)
+          - .transform(df) onde outputCol=col → insere df = df.drop("col") antes
+        """
+        col = entities.get("column_name", "")
+        if not col:
+            return "Nenhum nome de coluna extraído do erro — sem fix determinístico"
+
+        content = notebook_path.read_text(encoding="utf-8")
+        fixes = 0
+
+        # Fix 1: withColumn("col", ...) → drop("col").withColumn("col", ...)
+        with_col_pattern = re.compile(
+            r'(\.withColumn\(\s*["\']' + re.escape(col) + r'["\'])',
+            re.IGNORECASE,
+        )
+        if with_col_pattern.search(content):
+            content = with_col_pattern.sub(
+                f'.drop("{col}")\\1  # [AUTO-FIX] drop col duplicada',
+                content,
+            )
+            fixes += 1
+
+        # Fix 2: .transform(df) imediatamente após StringIndexer com outputCol=col
+        # Insere df = df.drop("col") na linha anterior ao .fit() ou .transform()
+        transform_pattern = re.compile(
+            r'([ \t]*)(\w+\s*=\s*\w+\.fit\(\w+\)\.transform\(\w+\))',
+            re.MULTILINE,
+        )
+
+        def _insert_drop(m: re.Match) -> str:
+            indent = m.group(1)
+            stmt = m.group(2)
+            # Extrai o DataFrame passado para transform
+            df_match = re.search(r'\.transform\((\w+)\)', stmt)
+            df_var = df_match.group(1) if df_match else None
+            if df_var:
+                return (
+                    f'{indent}{df_var} = {df_var}.drop("{col}")  '
+                    f'# [AUTO-FIX] remove col duplicada antes do transform\n'
+                    f'{indent}{stmt}'
+                )
+            return m.group(0)
+
+        # Só aplica Fix 2 se o outputCol=col estiver nas linhas próximas
+        if f'outputCol="{col}"' in content or f"outputCol='{col}'" in content:
+            new_content = transform_pattern.sub(_insert_drop, content)
+            if new_content != content:
+                content = new_content
+                fixes += 1
+
+        if fixes == 0:
+            return f"Padrão de coluna duplicada '{col}' não encontrado para fix determinístico"
+
+        notebook_path.write_text(content, encoding="utf-8")
+        return f"Coluna duplicada '{col}' corrigida em {fixes} local(is)"

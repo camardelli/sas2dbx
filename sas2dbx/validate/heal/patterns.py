@@ -235,6 +235,22 @@ ERROR_PATTERNS: dict[str, ErrorPattern] = {
         "deterministic_fix": "fix_overwrite_schema",
         "severity": "HIGH",
     },
+    "output_column_exists": {
+        "pattern": re.compile(
+            r"IllegalArgumentException.*requirement failed.*Output column\s+([\w]+)\s+already exists"
+            r"|Output column\s+([\w]+)\s+already exists",
+            re.IGNORECASE,
+        ),
+        "category": "output_column_exists",
+        "deterministic_fix": "fix_output_column_exists",
+        "severity": "HIGH",
+        "entity_extractors": {
+            "column_name": re.compile(
+                r"Output column\s+([\w]+)\s+already exists",
+                re.IGNORECASE,
+            ),
+        },
+    },
     "rdd_not_allowed_serverless": {
         "pattern": re.compile(
             r"NOT_IMPLEMENTED.*PySpark RDDs"

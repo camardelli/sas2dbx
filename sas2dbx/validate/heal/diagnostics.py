@@ -169,6 +169,15 @@ class DiagnosticsEngine:
         if col_match:
             entities["column_name"] = col_match.group(1)
 
+        # Coluna duplicada: "Output column <col> already exists"
+        dup_col_match = re.search(
+            r"Output column\s+([\w]+)\s+already exists",
+            error_message,
+            re.IGNORECASE,
+        )
+        if dup_col_match:
+            entities["column_name"] = dup_col_match.group(1)
+
         # Função: padrão "Undefined function: <name>"
         func_match = re.search(
             r"Undefined function[:\s]+[`'\"]?([\w]+)[`'\"]?",
