@@ -358,6 +358,9 @@ class PreflightChecker:
         # 4. Nomes com '<' ou '>' (placeholders de template como "<nome>")
         # 5. Prefixos de módulos Python conhecidos (pyspark.sql, scipy.stats, etc.)
         #    — o regex FROM captura 'from pyspark.sql import' como "pyspark.sql"
+        # 6. Nomes que começam com '.' — são métodos Python (.drop, .select, .filter, etc.)
+        #    capturados quando o LLM gera SQL com JOIN/FROM na última linha e o método
+        #    Python fica na linha seguinte (ex: "JOIN\n.drop(...)").
         _SQL_KEYWORDS = {"dual", "values", "lateral", "unnest"}
         _PYTHON_MODULE_PREFIXES = {
             "pyspark", "scipy", "numpy", "pandas", "matplotlib",
@@ -369,6 +372,7 @@ class PreflightChecker:
             t for t in input_tables
             if "." in t
             and len(t) > 3
+            and not t.startswith(".")
             and not t.endswith(".")
             and "<" not in t
             and ">" not in t

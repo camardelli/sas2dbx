@@ -86,6 +86,47 @@ class TestExtractInputTables:
         result = self._checker()._extract_input_tables(content)
         assert "main.s.pedidos" in result
 
+    def test_dot_method_not_extracted_after_join(self) -> None:
+        """Falso positivo: JOIN/FROM na última linha de SQL + método Python na seguinte.
+
+        O LLM às vezes gera SQL com CROSS JOIN sozinho na linha e o method chain
+        (.drop, .select) na linha seguinte dentro ou fora da string SQL.
+        """
+        content = '''df = spark.sql("""
+    SELECT *
+    FROM telcostar.operacional.cross_sell_base a
+    CROSS JOIN
+.drop("temp_col")
+""")
+'''
+        result = self._checker()._extract_input_tables(content)
+        assert ".drop" not in result
+        assert "telcostar.operacional.cross_sell_base" in result
+
+    def test_dot_method_not_extracted_after_from(self) -> None:
+        """FROM sozinho na linha seguido de .select não deve ser extraído como tabela."""
+        content = '''df = spark.sql("""
+    SELECT *
+    FROM
+.select("id","val")
+""")
+'''
+        result = self._checker()._extract_input_tables(content)
+        assert ".select" not in result
+
+    def test_dot_method_not_extracted_after_left_join(self) -> None:
+        """LEFT JOIN + newline + .drop não deve ser extraído."""
+        content = '''df = spark.sql("""
+    SELECT *
+    FROM main.s.base
+    LEFT JOIN
+.drop("dup")
+""")
+'''
+        result = self._checker()._extract_input_tables(content)
+        assert ".drop" not in result
+        assert "main.s.base" in result
+
 
 # ---------------------------------------------------------------------------
 # _resolve_fstring_tables — unidade isolada
