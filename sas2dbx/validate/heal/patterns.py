@@ -245,6 +245,19 @@ ERROR_PATTERNS: dict[str, ErrorPattern] = {
         "deterministic_fix": "fix_output_column_exists",
         "severity": "HIGH",
     },
+    "kwarg_as_string": {
+        # Macro SAS convertida com argumento keyword embutido como string literal
+        # Ex: func("param=18") em vez de func(param=18)
+        # Detectado em runtime como: TypeError: bad operand type for unary -: 'str'
+        "pattern": re.compile(
+            r"TypeError: bad operand type for unary -: 'str'"
+            r"|bad operand type for unary -.*str",
+            re.IGNORECASE,
+        ),
+        "category": "kwarg_as_string",
+        "deterministic_fix": "fix_kwarg_as_string",
+        "severity": "HIGH",
+    },
     "rdd_not_allowed_serverless": {
         "pattern": re.compile(
             r"NOT_IMPLEMENTED.*PySpark RDDs"

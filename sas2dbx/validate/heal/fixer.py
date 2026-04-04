@@ -27,6 +27,7 @@ _HANDLERS: dict[str, str] = {
     "fix_parse_syntax_if_not_exists": "_fix_parse_syntax_if_not_exists",
     "fix_rdd_flatmap": "_fix_rdd_flatmap",
     "fix_output_column_exists": "_fix_output_column_exists",
+    "fix_kwarg_as_string": "_fix_kwarg_as_string",
 }
 
 # Mapeamento de funções SQL SAS/não-suportadas → equivalente Spark SQL.
@@ -1277,3 +1278,39 @@ class NotebookFixer:
             f"{fixes} local(is) corrigido(s) — "
             f"colunas: {sorted(all_output_cols)}"
         )
+
+    def _fix_kwarg_as_string(
+        self, notebook_path: Path, entities: dict[str, str]
+    ) -> str:
+        """Corrige chamadas de função onde argumento keyword foi embutido como string.
+
+        Padrão gerado incorretamente pelo LLM ao converter chamadas de macro SAS:
+            func("param=18", spark=spark)   # errado — 'param=18' é posicional, vira str
+            func(param=18, spark=spark)     # correto — keyword argument
+
+        O erro em runtime é: TypeError: bad operand type for unary -: 'str'
+        quando o código usa -param_var com o valor sendo uma string.
+        """
+        content = notebook_path.read_text(encoding="utf-8")
+
+        # Padrão: func("nome_param=valor", ...) onde "nome_param=valor" é uma string
+        # Captura: nome da função, nome do param, valor (int ou string sem aspas)
+        _kwarg_str_pattern = re.compile(
+            r'(\w+)\(\s*["\']([A-Za-z_]\w*=\d+)["\']',
+        )
+
+        fixes = 0
+        def _fix_kwarg(m: re.Match) -> str:
+            nonlocal fixes
+            func_name = m.group(1)
+            kwarg_str = m.group(2)  # ex: "meses_retro=18"
+            fixes += 1
+            return f'{func_name}({kwarg_str}'  # vira: func(meses_retro=18
+
+        new_content = _kwarg_str_pattern.sub(_fix_kwarg, content)
+
+        if fixes == 0:
+            return "Padrão kwarg-como-string não encontrado no notebook"
+
+        notebook_path.write_text(new_content, encoding="utf-8")
+        return f"{fixes} chamada(s) corrigida(s) — argumento keyword desembulhado da string"
