@@ -1199,59 +1199,80 @@ class NotebookFixer:
         Causa: StringIndexer/VectorAssembler ou withColumn tentando criar coluna
         que já existe no DataFrame.
 
-        Fix:
-          - withColumn("col", ...) → drop("col").withColumn("col", ...)
-          - .transform(df) onde outputCol=col → insere df = df.drop("col") antes
-        """
-        col = entities.get("column_name", "")
-        if not col:
-            return "Nenhum nome de coluna extraído do erro — sem fix determinístico"
+        Estratégia: corrige TODAS as colunas potencialmente duplicadas no notebook
+        de uma só vez (não apenas a coluna do erro corrente), evitando múltiplas
+        iterações de healing para o mesmo padrão.
 
+        Fix por tipo:
+          1. withColumn("col", ...) → .drop("col").withColumn("col", ...)
+          2. Antes de .fit(df).transform(df): insere df = df.drop(*all_output_cols)
+             para todos os outputCol declarados no notebook
+        """
         content = notebook_path.read_text(encoding="utf-8")
+
+        # Coleta o nome do erro atual + todos os outputCol declarados no notebook
+        error_col = entities.get("column_name", "")
+        all_output_cols: set[str] = set()
+        if error_col:
+            all_output_cols.add(error_col)
+
+        # Extrai todos os outputCol="..." e inputCols=[...] do notebook
+        for m in re.finditer(r'outputCol\s*=\s*["\'](\w+)["\']', content):
+            all_output_cols.add(m.group(1))
+        # outputCols (VectorAssembler): outputCol param com lista → já capturado acima
+
+        if not all_output_cols:
+            return "Nenhuma coluna de output encontrada no notebook"
+
         fixes = 0
 
-        # Fix 1: withColumn("col", ...) → drop("col").withColumn("col", ...)
-        with_col_pattern = re.compile(
-            r'(\.withColumn\(\s*["\']' + re.escape(col) + r'["\'])',
-            re.IGNORECASE,
-        )
-        if with_col_pattern.search(content):
-            content = with_col_pattern.sub(
-                f'.drop("{col}")\\1  # [AUTO-FIX] drop col duplicada',
-                content,
+        # Fix 1: .withColumn("col", ...) → .drop("col").withColumn("col", ...)
+        # Aplicado para todas as colunas de output identificadas
+        for col in sorted(all_output_cols):
+            with_col_pattern = re.compile(
+                r'(\.withColumn\(\s*["\']' + re.escape(col) + r'["\'])',
+                re.IGNORECASE,
             )
-            fixes += 1
+            if with_col_pattern.search(content):
+                content = with_col_pattern.sub(
+                    f'.drop("{col}")\\1  # [AUTO-FIX] drop col duplicada',
+                    content,
+                )
+                fixes += 1
 
-        # Fix 2: .transform(df) imediatamente após StringIndexer com outputCol=col
-        # Insere df = df.drop("col") na linha anterior ao .fit() ou .transform()
+        # Fix 2: antes de cada .fit(df).transform(df), insere drop de TODAS as
+        # output cols identificadas — resolve múltiplos StringIndexers de uma vez
         transform_pattern = re.compile(
-            r'([ \t]*)(\w+\s*=\s*\w+\.fit\(\w+\)\.transform\(\w+\))',
+            r'([ \t]*)(\w+\s*=\s*\w+\.fit\((\w+)\)\.transform\(\3\))',
             re.MULTILINE,
         )
 
-        def _insert_drop(m: re.Match) -> str:
+        cols_to_drop = sorted(all_output_cols)
+        drop_expr = ", ".join(f'"{c}"' for c in cols_to_drop)
+
+        def _insert_drop_all(m: re.Match) -> str:
             indent = m.group(1)
             stmt = m.group(2)
-            # Extrai o DataFrame passado para transform
-            df_match = re.search(r'\.transform\((\w+)\)', stmt)
-            df_var = df_match.group(1) if df_match else None
-            if df_var:
-                return (
-                    f'{indent}{df_var} = {df_var}.drop("{col}")  '
-                    f'# [AUTO-FIX] remove col duplicada antes do transform\n'
-                    f'{indent}{stmt}'
-                )
-            return m.group(0)
+            df_var = m.group(3)
+            return (
+                f'{indent}{df_var} = {df_var}.drop({drop_expr})  '
+                f'# [AUTO-FIX] remove output cols duplicadas\n'
+                f'{indent}{stmt}'
+            )
 
-        # Só aplica Fix 2 se o outputCol=col estiver nas linhas próximas
-        if f'outputCol="{col}"' in content or f"outputCol='{col}'" in content:
-            new_content = transform_pattern.sub(_insert_drop, content)
-            if new_content != content:
-                content = new_content
-                fixes += 1
+        new_content = transform_pattern.sub(_insert_drop_all, content)
+        if new_content != content:
+            content = new_content
+            fixes += len(list(transform_pattern.finditer(content)))  # conta transforms
 
         if fixes == 0:
-            return f"Padrão de coluna duplicada '{col}' não encontrado para fix determinístico"
+            return (
+                f"Colunas {sorted(all_output_cols)} não encontradas em withColumn/"
+                "fit.transform — sem fix determinístico"
+            )
 
         notebook_path.write_text(content, encoding="utf-8")
-        return f"Coluna duplicada '{col}' corrigida em {fixes} local(is)"
+        return (
+            f"{fixes} local(is) corrigido(s) — "
+            f"colunas: {sorted(all_output_cols)}"
+        )
