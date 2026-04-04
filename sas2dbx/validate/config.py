@@ -29,6 +29,11 @@ class DatabricksConfig:
     spark_version: str = "13.3.x-scala2.12"
     warehouse_id: str | None = None
     cluster_id: str | None = None  # None = serverless (padrão); preencher para cluster clássico
+    auto_force_schemas: list[str] = field(default_factory=list)
+    """Schemas cujas tabelas ausentes são auto-bootstrapped sem bloquear deploy.
+    Ex: ["telcostar.operacional", "main.raw"] — qualquer tabela nesses schemas
+    é tratada como MISSING_UPSTREAM (placeholder injetado automaticamente).
+    """
 
     @classmethod
     def from_env(cls) -> "DatabricksConfig":
@@ -65,6 +70,11 @@ class DatabricksConfig:
             spark_version=os.environ.get("DATABRICKS_SPARK_VERSION", "13.3.x-scala2.12"),
             warehouse_id=os.environ.get("DATABRICKS_WAREHOUSE_ID") or None,
             cluster_id=os.environ.get("DATABRICKS_CLUSTER_ID") or None,
+            auto_force_schemas=[
+                s.strip()
+                for s in os.environ.get("DATABRICKS_AUTO_FORCE_SCHEMAS", "").split(",")
+                if s.strip()
+            ],
         )
 
     def is_complete(self) -> bool:
@@ -80,5 +90,6 @@ class DatabricksConfig:
             "node_type_id": self.node_type_id,
             "spark_version": self.spark_version,
             "warehouse_id": self.warehouse_id,
+            "auto_force_schemas": self.auto_force_schemas,
             "is_complete": self.is_complete(),
         }

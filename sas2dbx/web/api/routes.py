@@ -362,6 +362,7 @@ async def set_databricks_config(
         node_type_id=body.node_type_id,
         spark_version=body.spark_version,
         warehouse_id=body.warehouse_id or None,
+        auto_force_schemas=body.auto_force_schemas,
     )
     request.app.state.databricks_config = cfg
     logger.info("POST /config/databricks: configuração atualizada para %s", cfg.host)
@@ -377,6 +378,33 @@ async def get_databricks_config_status(request: Request) -> DatabricksConfigStat
             status_code=404,
             detail="Configuração Databricks não definida. Use POST /config/databricks.",
         )
+    return DatabricksConfigStatus(**_config_to_status_dict(cfg))
+
+
+@router.post("/config/databricks/auto-force-schemas", response_model=DatabricksConfigStatus)
+async def set_auto_force_schemas(
+    request: Request,
+    body: dict,
+) -> DatabricksConfigStatus:
+    """Atualiza apenas auto_force_schemas na config Databricks existente.
+
+    Body: {"schemas": ["telcostar.operacional", "main.raw"]}
+    Não requer reenvio de host/token — atualiza a config em memória.
+    """
+    cfg = _dbx_config(request)
+    if cfg is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Configure as credenciais Databricks primeiro via POST /config/databricks.",
+        )
+    schemas = body.get("schemas", [])
+    if not isinstance(schemas, list):
+        raise HTTPException(status_code=422, detail="'schemas' deve ser uma lista de strings.")
+    cfg.auto_force_schemas = [s.strip() for s in schemas if isinstance(s, str) and s.strip()]
+    logger.info(
+        "POST /config/databricks/auto-force-schemas: atualizado — %s",
+        cfg.auto_force_schemas,
+    )
     return DatabricksConfigStatus(**_config_to_status_dict(cfg))
 
 

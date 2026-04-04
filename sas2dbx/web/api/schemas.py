@@ -83,6 +83,7 @@ class DatabricksConfigRequest(BaseModel):
     node_type_id: str = "i3.xlarge"
     spark_version: str = "13.3.x-scala2.12"
     warehouse_id: str | None = None
+    auto_force_schemas: list[str] = []
 
 
 class DatabricksConfigStatus(BaseModel):
@@ -94,6 +95,7 @@ class DatabricksConfigStatus(BaseModel):
     node_type_id: str
     spark_version: str
     warehouse_id: str | None
+    auto_force_schemas: list[str] = []
     is_complete: bool
 
 

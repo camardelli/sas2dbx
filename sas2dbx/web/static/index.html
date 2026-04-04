@@ -516,6 +516,23 @@
     <div id="upload-error"></div>
   </div>
 
+  <div class="card" id="dbx-config-card">
+    <h2>Configurações Databricks</h2>
+    <div style="font-size:.83rem;color:var(--muted);margin-bottom:12px">
+      Schemas configurados abaixo têm tabelas ausentes tratadas como <strong>placeholders automáticos</strong> — sem bloquear o deploy.
+    </div>
+    <div class="form-row">
+      <div class="form-group" style="flex:1">
+        <label>Auto-Force Schemas <span style="font-weight:400;color:var(--muted)">(vírgula separada, ex: telcostar.operacional,main.raw)</span></label>
+        <input type="text" id="inp-auto-force-schemas" placeholder="telcostar.operacional" style="width:100%" />
+      </div>
+    </div>
+    <div class="action-bar" style="margin-top:8px">
+      <button class="btn-action primary" id="btn-save-dbx-config" onclick="saveDbxConfig()">Salvar</button>
+      <span id="dbx-config-status" style="font-size:.8rem;color:var(--muted);margin-left:8px"></span>
+    </div>
+  </div>
+
   <div class="card">
     <h2>Migrações Anteriores</h2>
     <div id="history-container">
@@ -685,6 +702,9 @@ window.addEventListener("load", () => {
     .then(cfg => {
       if (cfg && cfg.catalog) document.getElementById("inp-catalog").value = cfg.catalog;
       if (cfg && cfg.schema)  document.getElementById("inp-schema").value  = cfg.schema;
+      if (cfg && cfg.auto_force_schemas && cfg.auto_force_schemas.length) {
+        document.getElementById("inp-auto-force-schemas").value = cfg.auto_force_schemas.join(", ");
+      }
     })
     .catch(() => {/* silencia — sem config Databricks ainda */});
   route();
@@ -693,6 +713,30 @@ window.addEventListener("load", () => {
 // ============================================================
 // Utilitários
 // ============================================================
+
+async function saveDbxConfig() {
+  const raw = document.getElementById("inp-auto-force-schemas").value;
+  const schemas = raw.split(",").map(s => s.trim()).filter(Boolean);
+  const btn = document.getElementById("btn-save-dbx-config");
+  const statusEl = document.getElementById("dbx-config-status");
+  btn.disabled = true;
+  statusEl.textContent = "Salvando…";
+  try {
+    const r = await apiFetch("/config/databricks/auto-force-schemas", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ schemas }),
+    });
+    const data = await r.json();
+    const saved = (data.auto_force_schemas || []).join(", ") || "(nenhum)";
+    statusEl.textContent = `✓ Salvo: ${saved}`;
+    setTimeout(() => { statusEl.textContent = ""; }, 4000);
+  } catch (e) {
+    statusEl.textContent = "Erro: " + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
 
 /** Escapa caracteres HTML para prevenir XSS em interpolações de innerHTML. */
 function encodeHTML(s) {

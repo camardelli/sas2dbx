@@ -377,6 +377,28 @@ class MigrationWorker:
                         notebook=ghost.notebooks[0] if ghost.notebooks else "",
                     )
 
+                # Auto-force: se todos os MISSING_SOURCE pertencem a schemas configurados
+                # em auto_force_schemas, promove force_deploy automaticamente sem bloquear.
+                auto_force_schemas: list[str] = getattr(config, "auto_force_schemas", [])
+                if preflight_report.missing_source and not force_deploy and auto_force_schemas:
+                    auto_forced = all(
+                        any(
+                            g.table_name.startswith(schema + ".")
+                            for schema in auto_force_schemas
+                        )
+                        for g in preflight_report.missing_source
+                    )
+                    if auto_forced:
+                        logger.info(
+                            "MigrationWorker[validate %s]: auto_force_deploy — "
+                            "%d tabela(s) pertencem a schemas configurados (%s), "
+                            "procedendo com bootstrap automático",
+                            migration_id,
+                            len(preflight_report.missing_source),
+                            ", ".join(auto_force_schemas),
+                        )
+                        force_deploy = True
+
                 # MISSING_SOURCE → bloquear (requer dados reais) — a não ser que force_deploy
                 if preflight_report.missing_source and not force_deploy:
                     logger.warning(
