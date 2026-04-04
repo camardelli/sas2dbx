@@ -694,6 +694,13 @@ class NotebookFixer:
             "count", "total", "row_num", "rank", "sum", "avg", "min", "max",
             "row_number", "dense_rank", "first", "last",
         }
+
+        # Exclui colunas que são outputs de agregação dentro do próprio notebook
+        # (resultado de .alias("col") em .agg() ou .groupBy().agg()).
+        # Injetar essas colunas como NULL em tabelas fonte causa ambiguidade quando
+        # o notebook faz join com o DataFrame que as computa.
+        _alias_outputs = set(re.findall(r'\.alias\(\s*["\'](\w+)["\']\s*\)', content))
+
         business_cols = [
             c for c in all_cols
             if c != missing_column
@@ -701,6 +708,7 @@ class NotebookFixer:
             and not _SQL_AGG_PATTERN.match(c)  # exclui ALL_CAPS
             and c.lower() not in _EXCLUDE_NAMES
             and "_" in c  # nomes snake_case — provavelmente colunas de negócio
+            and c not in _alias_outputs  # exclui outputs de aggregation no notebook
         ]
         cols_to_add: list[str] = [missing_column] + business_cols
         cols_repr = "[" + ", ".join(f'"{c}"' for c in cols_to_add) + "]"
