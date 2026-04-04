@@ -999,6 +999,18 @@ async function cancelMigration() {
     btn.disabled = false;
     btn.textContent = "⏹ Cancelar processamento";
     statusEl.textContent = "";
+    // Polling curto até o worker confirmar status final dos jobs (max 10s)
+    let attempts = 0;
+    const finalPoll = setInterval(async () => {
+      attempts++;
+      try {
+        const r = await apiFetch(`/migrations/${id}`);
+        const data = await r.json();
+        const hasPending = (data.jobs || []).some(j => j.status === "in_progress" || j.status === "pending");
+        renderStatus(data);
+        if (!hasPending || attempts >= 5) clearInterval(finalPoll);
+      } catch (_) { clearInterval(finalPoll); }
+    }, 2000);
   } catch (e) {
     btn.disabled = false;
     btn.textContent = "⏹ Cancelar processamento";
