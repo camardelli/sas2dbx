@@ -132,7 +132,7 @@ class DatabricksDeployer:
             try:
                 from databricks.sdk.service.jobs import JobSettings
                 sdk_settings = JobSettings.from_dict(settings)
-            except (ImportError, AttributeError):
+            except Exception:  # noqa: BLE001 — ImportError, AttributeError, TypeError, KeyError
                 sdk_settings = settings  # type: ignore[assignment]
             self._client.jobs.reset(job_id=existing.job_id, new_settings=sdk_settings)
             return existing.job_id

@@ -1229,13 +1229,16 @@ class NotebookFixer:
         # Fix 1: .withColumn("col", ...) → .drop("col").withColumn("col", ...)
         # Aplicado para todas as colunas de output identificadas
         for col in sorted(all_output_cols):
+            # Captura a linha completa que contém .withColumn("col", ...) e
+            # prefixa com .drop("col") na mesma linha — sem inserir comentário
+            # dentro da chamada de função (evita SyntaxError no notebook)
             with_col_pattern = re.compile(
-                r'(\.withColumn\(\s*["\']' + re.escape(col) + r'["\'])',
+                r'\.withColumn\(\s*["\']' + re.escape(col) + r'["\']',
                 re.IGNORECASE,
             )
             if with_col_pattern.search(content):
                 content = with_col_pattern.sub(
-                    f'.drop("{col}")\\1  # [AUTO-FIX] drop col duplicada',
+                    f'.drop("{col}").withColumn("{col}"',
                     content,
                 )
                 fixes += 1

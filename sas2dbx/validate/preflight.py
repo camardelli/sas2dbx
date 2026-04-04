@@ -39,9 +39,9 @@ _RE_READ_TABLE_FSTRING = re.compile(
     r'spark\.read\.table\(\s*f["\']([^"\']+)["\']\s*\)',
     re.IGNORECASE,
 )
-# Atribuição de variável de string simples: VAR = "valor" ou VAR = 'valor'
+# Atribuição de variável de string simples: VAR = "valor" ou var = 'valor' (case insensitive)
 _RE_VAR_ASSIGN = re.compile(
-    r'^[ \t]*([A-Z_][A-Z0-9_]*)\s*=\s*["\']([^"\']+)["\']',
+    r'^[ \t]*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*["\']([^"\']+)["\']',
     re.MULTILINE,
 )
 _RE_SPARK_SQL_FROM = re.compile(
@@ -240,7 +240,7 @@ class PreflightChecker:
             # Substitui todas as ocorrências de {VAR} pelos valores conhecidos
             try:
                 result = re.sub(
-                    r'\{([A-Z_][A-Z0-9_]*)\}',
+                    r'\{([A-Za-z_][A-Za-z0-9_]*)\}',
                     lambda mm: var_map.get(mm.group(1), mm.group(0)),
                     template,
                 )

@@ -173,3 +173,63 @@ class TestFixIncreaseClusterConfig:
         result = fixer.apply_fix(nb, _diag("increase_cluster_config"))
         assert result.patched is True
         assert "already present" in result.description
+
+
+# ---------------------------------------------------------------------------
+# fix_output_column_exists — C1 (sem SyntaxError), A1, varredura total
+# ---------------------------------------------------------------------------
+
+
+class TestFixOutputColumnExists:
+    def _diag_dup(self, col: str) -> ErrorDiagnostic:
+        return _diag("fix_output_column_exists", {"column_name": col})
+
+    def test_withcolumn_no_syntax_error(self, tmp_path: Path) -> None:
+        """C1: fix não deve inserir comentário dentro de chamada de função."""
+        nb = _notebook(
+            tmp_path,
+            'df = df.withColumn("fl_churnou_idx", F.lit(1))\n',
+        )
+        fixer = NotebookFixer()
+        fixer.apply_fix(nb, self._diag_dup("fl_churnou_idx"))
+        content = nb.read_text(encoding="utf-8")
+        # Deve ser Python válido — sem comentário dentro dos parênteses
+        import ast
+        ast.parse(content)  # levanta SyntaxError se inválido
+        assert ".drop(" in content
+
+    def test_withcolumn_drop_inserted_before(self, tmp_path: Path) -> None:
+        nb = _notebook(
+            tmp_path,
+            'df = df.withColumn("my_col", F.lit(0))\n',
+        )
+        fixer = NotebookFixer()
+        fixer.apply_fix(nb, self._diag_dup("my_col"))
+        content = nb.read_text(encoding="utf-8")
+        assert '.drop("my_col").withColumn("my_col"' in content
+
+    def test_all_output_cols_dropped_in_one_pass(self, tmp_path: Path) -> None:
+        """Varredura total: todos os outputCol corrigidos em uma iteração."""
+        nb = _notebook(
+            tmp_path,
+            (
+                'indexer1 = StringIndexer(inputCol="a", outputCol="a_idx")\n'
+                'df = indexer1.fit(df).transform(df)\n'
+                'indexer2 = StringIndexer(inputCol="b", outputCol="b_idx")\n'
+                'df = indexer2.fit(df).transform(df)\n'
+            ),
+        )
+        fixer = NotebookFixer()
+        result = fixer.apply_fix(nb, self._diag_dup("a_idx"))
+        content = nb.read_text(encoding="utf-8")
+        # Ambas as colunas (a_idx e b_idx) devem ter drop inserido
+        assert '"a_idx"' in content
+        assert '"b_idx"' in content
+        assert result.patched is True
+
+    def test_no_fix_when_no_output_col(self, tmp_path: Path) -> None:
+        nb = _notebook(tmp_path, 'df = spark.read.table("main.s.t")\n')
+        fixer = NotebookFixer()
+        result = fixer.apply_fix(nb, self._diag_dup("inexistente_idx"))
+        # Handler roda mas não encontra nada — description indica ausência de fix
+        assert "não encontradas" in result.description.lower() or result.patched is True

@@ -71,6 +71,16 @@ class TestExtractInputTables:
         result = self._checker()._extract_input_tables(content)
         assert "tabela_sem_schema" not in result
 
+    def test_fstring_resolved_from_lowercase_variable(self) -> None:
+        """Variáveis snake_case (lowercase) também devem ser resolvidas — A1."""
+        content = (
+            'catalog_name = "main"\n'
+            'schema_name = "raw"\n'
+            'df = spark.read.table(f"{catalog_name}.{schema_name}.clientes")\n'
+        )
+        result = self._checker()._extract_input_tables(content)
+        assert "main.raw.clientes" in result
+
     def test_from_clause_extracted(self) -> None:
         content = 'spark.sql("SELECT * FROM main.s.pedidos")'
         result = self._checker()._extract_input_tables(content)
