@@ -523,6 +523,57 @@ async def resume_validation(
 
 
 # ---------------------------------------------------------------------------
+# Validation force-deploy endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/migrations/{migration_id}/validation/force", status_code=202)
+async def force_validation(
+    migration_id: UUID,
+    request: Request,
+) -> ValidationResponse:
+    """Força deploy ignorando tabelas de origem ausentes (cria placeholders).
+
+    Usa quando o usuário quer prosseguir mesmo sem as tabelas de origem disponíveis.
+    Placeholders DELTA vazios são injetados nos notebooks para evitar TABLE_NOT_FOUND.
+    Requer que a validação esteja em status 'awaiting_tables'.
+    """
+    storage = _storage(request)
+    cfg = _dbx_config(request)
+
+    if cfg is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Configure as credenciais Databricks primeiro via POST /config/databricks.",
+        )
+
+    try:
+        meta = storage.get_meta(str(migration_id))
+    except MigrationNotFoundError:
+        raise HTTPException(status_code=404, detail="Migração não encontrada.") from None
+
+    validation = meta.get("validation", {})
+    if validation.get("status") != "awaiting_tables":
+        raise HTTPException(
+            status_code=409,
+            detail="Force deploy só disponível quando status é 'awaiting_tables' "
+                   f"(status atual: {validation.get('status', 'none')}).",
+        )
+
+    meta["validation"] = {"status": "running"}
+    storage.save_meta(str(migration_id), meta)
+
+    worker = request.app.state.worker
+    from sas2dbx.web.worker import MigrationWorker  # noqa: F401 — já importado no topo
+    worker.start_validation(str(migration_id), cfg, [], False, False, force_deploy=True)
+
+    return ValidationResponse(
+        migration_id=str(migration_id),
+        validation_status="running",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Cancel endpoint
 # ---------------------------------------------------------------------------
 

@@ -567,6 +567,7 @@
     <div id="awaiting-tables-list" style="margin-bottom:12px"></div>
     <div class="action-bar">
       <button class="btn-action primary" id="btn-resume-validation">Verificar e Retomar Deploy</button>
+      <button class="btn-action" id="btn-force-deploy" style="background:rgba(239,68,68,.12);color:var(--red);border-color:rgba(239,68,68,.3)" title="Deploy com placeholders vazios — dados reais necessários para execução correta">Forçar Deploy (ignorar warnings)</button>
       <span id="resume-validation-status" style="font-size:.8rem;color:var(--muted);margin-left:8px"></span>
     </div>
   </div>
@@ -679,6 +680,16 @@ function badge(status) {
   return `<span class="badge ${cls}">${label}</span>`;
 }
 
+function stageBadge(status) {
+  const map = {
+    done:    { cls: "badge-done",    label: "DONE" },
+    failed:  { cls: "badge-failed",  label: "Failed" },
+    pending: { cls: "badge-pending", label: "Pending" },
+  };
+  const s = map[status] || map.pending;
+  return `<span class="badge ${s.cls}">${s.label}</span>`;
+}
+
 function fmtDate(iso) {
   if (!iso) return "—";
   const d = new Date(iso);
@@ -721,13 +732,15 @@ async function loadHistory() {
     container.innerHTML = `
       <table>
         <thead><tr>
-          <th>ID</th><th>Status</th><th>Criado em</th><th></th>
+          <th>ID</th><th>Transpilação</th><th>Deploy</th><th>Execução</th><th>Criado em</th><th></th>
         </tr></thead>
         <tbody>
           ${list.map(m => `
             <tr class="clickable" onclick="location.hash='#/migrations/${encodeHTML(m.migration_id)}'">
               <td class="mono">${encodeHTML(m.migration_id.substring(0, 8))}…</td>
-              <td>${badge(m.status)}</td>
+              <td>${stageBadge(m.transpile_status)}</td>
+              <td>${stageBadge(m.deploy_status)}</td>
+              <td>${stageBadge(m.execution_status)}</td>
               <td>${fmtDate(m.created_at)}</td>
               <td><button class="btn-delete-row" title="Remover migração"
                 onclick="event.stopPropagation(); deleteMigration('${encodeHTML(m.migration_id)}')">✕</button></td>
@@ -1068,6 +1081,31 @@ async function resumeValidation() {
 }
 
 document.getElementById("btn-resume-validation").addEventListener("click", resumeValidation);
+
+async function forceValidation() {
+  const id = currentMigrationId();
+  const btn = document.getElementById("btn-force-deploy");
+  const statusEl = document.getElementById("resume-validation-status");
+  if (!confirm("Forçar deploy com tabelas de origem ausentes?\n\nPlaceholders vazios serão injetados. A execução pode falhar se os dados reais forem necessários.")) return;
+  btn.disabled = true;
+  btn.textContent = "Forçando…";
+  statusEl.textContent = "";
+  try {
+    await apiFetch(`/migrations/${id}/validation/force`, { method: "POST" });
+    document.getElementById("detail-awaiting-tables-card").style.display = "none";
+    document.getElementById("detail-validation-card").style.display = "block";
+    document.getElementById("btn-validate").disabled = true;
+    document.getElementById("btn-validate").textContent = "Validando…";
+    clearInterval(_validationTimer);
+    _validationTimer = setInterval(() => pollValidation(id), 5000);
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = "Forçar Deploy (ignorar warnings)";
+    statusEl.textContent = "Erro: " + e.message;
+  }
+}
+
+document.getElementById("btn-force-deploy").addEventListener("click", forceValidation);
 
 // ============================================================
 // Validação & Healing — fluxo completo automatizado

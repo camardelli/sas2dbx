@@ -117,11 +117,18 @@ class PreflightChecker:
     def __init__(self, config=None) -> None:
         self._config = config
 
-    def check(self, output_dir: Path) -> PreflightReport:
+    def check(
+        self,
+        output_dir: Path,
+        execution_order: list[str] | None = None,
+    ) -> PreflightReport:
         """Varre notebooks em output_dir e verifica tabelas de entrada.
 
         Args:
             output_dir: Diretório com notebooks .py gerados.
+            execution_order: Lista de nomes de job na ordem de execução da DAG.
+                Quando fornecido, permite distinguir tabelas intermediárias
+                (criadas por jobs anteriores) de fontes externas reais.
 
         Returns:
             PreflightReport com fontes fantasma identificadas.
@@ -184,46 +191,94 @@ class PreflightChecker:
 
         # Categoriza tabelas ausentes: upstream (criadas por notebook irmão) vs source
         if report.ghost_sources:
-            self._categorize_ghosts(report.ghost_sources, notebooks)
+            self._categorize_ghosts(report.ghost_sources, notebooks, execution_order)
 
         return report
 
     def _categorize_ghosts(
-        self, ghosts: list[GhostSource], notebooks: list[Path]
+        self,
+        ghosts: list[GhostSource],
+        notebooks: list[Path],
+        execution_order: list[str] | None = None,
     ) -> None:
         """Classifica cada tabela ausente como MISSING_SOURCE ou MISSING_UPSTREAM.
 
-        Uma tabela é MISSING_UPSTREAM se algum notebook irmão contiver
-        saveAsTable("...{table_short}...") — ou seja, deveria tê-la criado.
+        Regra: uma tabela é MISSING_UPSTREAM se for criada por algum notebook
+        da pipeline (via saveAsTable ou CREATE TABLE) que roda ANTES dos notebooks
+        que a consomem, segundo execution_order.
+
+        Sem execution_order, usa comportamento legado (qualquer notebook irmão).
         """
-        # Monta mapa: table_short → notebook que a cria
-        _save_pattern_tmpl = re.compile(
+        _save_pattern = re.compile(
             r'saveAsTable\(\s*["\']([^"\']+)["\']\s*\)',
             re.IGNORECASE,
         )
-        writes: dict[str, str] = {}  # table_short → notebook stem
+        _create_pattern = re.compile(
+            r'CREATE\s+(?:OR\s+REPLACE\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?'
+            r'([`"\']?[\w]+(?:\.[\w]+){1,2}[`"\']?)',
+            re.IGNORECASE,
+        )
+
+        # Mapa: nome_normalizado → notebook stem que cria a tabela
+        writes: dict[str, str] = {}
         for nb in notebooks:
             try:
                 content = nb.read_text(encoding="utf-8")
             except OSError:
                 continue
-            for m in _save_pattern_tmpl.finditer(content):
-                full_name = m.group(1).strip("`\"'")
-                short = full_name.split(".")[-1].lower()
-                writes[short] = nb.stem
-                writes[full_name.lower()] = nb.stem
+            for pattern in (_save_pattern, _create_pattern):
+                for m in pattern.finditer(content):
+                    full_name = m.group(1).strip("`\"'")
+                    if not full_name or len(full_name) < 3:
+                        continue
+                    short = full_name.split(".")[-1].lower()
+                    # Não sobrescreve se já mapeado (primeiro escritor vence)
+                    writes.setdefault(short, nb.stem)
+                    writes.setdefault(full_name.lower(), nb.stem)
+
+        # Índice de posição na execução: stem → int (menor = roda antes)
+        order_index: dict[str, int] = {}
+        if execution_order:
+            for pos, job_name in enumerate(execution_order):
+                order_index[job_name] = pos
 
         for ghost in ghosts:
             short = ghost.table_name.split(".")[-1].lower()
-            upstream = writes.get(short) or writes.get(ghost.table_name.lower())
-            if upstream:
+            upstream_nb = writes.get(short) or writes.get(ghost.table_name.lower())
+
+            if not upstream_nb:
+                ghost.category = TableCategory.MISSING_SOURCE
+                continue
+
+            if not execution_order:
+                # Sem ordem conhecida — trata qualquer notebook irmão como upstream
                 ghost.category = TableCategory.MISSING_UPSTREAM
-                ghost.upstream_notebook = upstream
+                ghost.upstream_notebook = upstream_nb
+                ghost.suggestion = f"Tabela intermediária — execute '{upstream_nb}' antes deste job"
+                continue
+
+            # Verifica se o notebook criador vem ANTES de todos os consumidores
+            upstream_pos = order_index.get(upstream_nb, len(execution_order))
+            consumer_positions = [
+                order_index.get(nb_stem, len(execution_order))
+                for nb_stem in ghost.notebooks
+            ]
+            earliest_consumer = min(consumer_positions, default=len(execution_order))
+
+            if upstream_pos < earliest_consumer:
+                ghost.category = TableCategory.MISSING_UPSTREAM
+                ghost.upstream_notebook = upstream_nb
                 ghost.suggestion = (
-                    f"Tabela intermediária — execute '{upstream}' antes deste job"
+                    f"Tabela intermediária — criada por '{upstream_nb}' "
+                    f"(job {upstream_pos + 1} na ordem de execução)"
                 )
             else:
+                # Criador vem depois ou na mesma posição: não resolve a dependência
                 ghost.category = TableCategory.MISSING_SOURCE
+                ghost.suggestion = (
+                    f"Tabela de origem externa — '{upstream_nb}' cria uma tabela "
+                    f"com este nome mas é posterior na execução"
+                )
 
     # ------------------------------------------------------------------
     # Internal

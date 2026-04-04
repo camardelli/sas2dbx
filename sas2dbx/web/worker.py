@@ -139,6 +139,7 @@ class MigrationWorker:
         tables: list[str] | None = None,
         deploy_only: bool = False,
         collect_only: bool = False,
+        force_deploy: bool = False,
     ) -> None:
         """Dispara o pipeline de validação Databricks em background thread.
 
@@ -148,15 +149,16 @@ class MigrationWorker:
             tables: Tabelas a coletar após execução.
             deploy_only: Se True, não executa o workflow.
             collect_only: Se True, não faz deploy — apenas coleta tabelas.
+            force_deploy: Se True, ignora fontes ausentes e faz deploy com placeholders.
         """
         thread = threading.Thread(
             target=self._run_validation,
-            args=(migration_id, config, tables or [], deploy_only, collect_only),
+            args=(migration_id, config, tables or [], deploy_only, collect_only, force_deploy),
             daemon=True,
             name=f"validate-{migration_id[:8]}",
         )
         thread.start()
-        logger.info("MigrationWorker: validação iniciada para %s", migration_id)
+        logger.info("MigrationWorker: validação iniciada para %s (force=%s)", migration_id, force_deploy)
 
     # ------------------------------------------------------------------
     # Pipeline
@@ -281,6 +283,7 @@ class MigrationWorker:
         tables: list[str],
         deploy_only: bool,
         collect_only: bool,
+        force_deploy: bool = False,
     ) -> None:
         """Pipeline de validação Databricks em background."""
         from sas2dbx.validate.collector import DatabricksCollector
@@ -343,7 +346,10 @@ class MigrationWorker:
             if not collect_only and notebooks:
                 from sas2dbx.validate.preflight import PreflightChecker
                 preflight = PreflightChecker(config)
-                preflight_report = preflight.check(output_dir)
+                # Lê execution_order persistido durante a transpilação para classificação correta
+                meta = self._storage.get_meta(migration_id)
+                execution_order = meta.get("execution_order") or []
+                preflight_report = preflight.check(output_dir, execution_order=execution_order or None)
                 logger.info(
                     "MigrationWorker[validate %s]: preflight — %s",
                     migration_id, preflight_report.summary(),
@@ -353,7 +359,12 @@ class MigrationWorker:
                 meta.setdefault("validation", {})["preflight"] = {
                     "summary": preflight_report.summary(),
                     "ghost_sources": [
-                        {"table": g.table_name, "notebooks": g.notebooks, "suggestion": g.suggestion}
+                        {
+                            "table": g.table_name,
+                            "notebooks": g.notebooks,
+                            "suggestion": g.suggestion,
+                            "category": g.category.value,
+                        }
                         for g in preflight_report.ghost_sources
                     ],
                     "skipped": preflight_report.skipped,
@@ -366,9 +377,8 @@ class MigrationWorker:
                         notebook=ghost.notebooks[0] if ghost.notebooks else "",
                     )
 
-                # Opção C: MISSING_SOURCE → bloquear (requer dados reais)
-                #           MISSING_UPSTREAM → bootstrap (notebook irmão vai popular)
-                if preflight_report.missing_source:
+                # MISSING_SOURCE → bloquear (requer dados reais) — a não ser que force_deploy
+                if preflight_report.missing_source and not force_deploy:
                     logger.warning(
                         "MigrationWorker[validate %s]: %d tabela(s) de origem ausente(s) — "
                         "bloqueando deploy até ingestão manual",
@@ -390,12 +400,21 @@ class MigrationWorker:
                     self._storage.save_meta(migration_id, meta)
                     return  # Interrompe — aguarda criação das tabelas de origem
 
-                # Bootstrap apenas para MISSING_UPSTREAM (tabelas intermediárias)
-                if preflight_report.missing_upstream:
+                # Bootstrap: MISSING_UPSTREAM sempre; MISSING_SOURCE apenas em force_deploy
+                ghosts_to_bootstrap = list(preflight_report.missing_upstream)
+                if force_deploy and preflight_report.missing_source:
+                    logger.warning(
+                        "MigrationWorker[validate %s]: force_deploy=True — "
+                        "injetando placeholders para %d tabela(s) de origem ausente(s)",
+                        migration_id, len(preflight_report.missing_source),
+                    )
+                    ghosts_to_bootstrap.extend(preflight_report.missing_source)
+
+                if ghosts_to_bootstrap:
                     total_bootstrapped = 0
                     for nb in notebooks:
                         relevant = [
-                            g for g in preflight_report.missing_upstream
+                            g for g in ghosts_to_bootstrap
                             if nb.stem in g.notebooks
                         ]
                         if relevant:
@@ -403,9 +422,9 @@ class MigrationWorker:
                             total_bootstrapped += len(created)
                     if total_bootstrapped:
                         logger.info(
-                            "MigrationWorker[validate %s]: preflight-bootstrap upstream — "
-                            "%d placeholder(s) injetados nos notebooks antes do deploy",
-                            migration_id, total_bootstrapped,
+                            "MigrationWorker[validate %s]: preflight-bootstrap — "
+                            "%d placeholder(s) injetados (force=%s)",
+                            migration_id, total_bootstrapped, force_deploy,
                         )
                         meta = self._storage.get_meta(migration_id)
                         meta.setdefault("validation", {}).setdefault("preflight", {})[
@@ -765,6 +784,10 @@ class MigrationWorker:
         graph = analyzer.analyze(sas_files)
         execution_order = graph.get_execution_order()
         step("analyze", "done", f"{len(graph.jobs)} job(s) · {len(graph.implicit_edges)} dep(s) implícita(s)")
+        # Persiste execution_order para uso no preflight durante a validação
+        meta = self._storage.get_meta(migration_id)
+        meta["execution_order"] = execution_order
+        self._storage.save_meta(migration_id, meta)
 
         # 4 — Transpilação (com LLM para Tier 2 se configurado)
         step("transpile", "running", f"0 / {len(sas_files)} jobs")
