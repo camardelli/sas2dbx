@@ -45,6 +45,7 @@ from sas2dbx.web.api.schemas import (
     ValidationSummary,
 )
 from sas2dbx.web.storage import MigrationNotFoundError, MigrationStorage
+from sas2dbx.web.worker import MigrationWorker
 
 logger = logging.getLogger(__name__)
 
@@ -541,16 +542,28 @@ async def cancel_migration(migration_id: UUID, request: Request):
     if not meta:
         raise HTTPException(status_code=404, detail="Migração não encontrada.")
 
-    status = meta.get("status", "")
-    if status not in ("processing", "pending"):
+    migration_status = meta.get("status", "")
+    validation_status = meta.get("validation", {}).get("status", "")
+    is_migrating = migration_status in ("processing", "pending")
+    is_validating = validation_status == "running"
+
+    if not is_migrating and not is_validating:
         raise HTTPException(
             status_code=409,
-            detail=f"Migração não está em execução (status={status!r}).",
+            detail=(
+                f"Nenhuma operação em andamento para cancelar "
+                f"(migration={migration_status!r}, validation={validation_status!r})."
+            ),
         )
 
     worker.cancel(str(migration_id))
-    storage.update_status(str(migration_id), "cancelled")
-    logger.info("cancel_migration: %s marcada como cancelled", migration_id)
+    if is_migrating:
+        storage.update_status(str(migration_id), "cancelled")
+    if is_validating:
+        meta["validation"]["status"] = "cancelled"
+        storage.save_meta(str(migration_id), meta)
+    logger.info("cancel_migration: %s cancelada (migration=%s, validation=%s)",
+                migration_id, migration_status, validation_status)
     return {"migration_id": str(migration_id), "status": "cancelled"}
 
 

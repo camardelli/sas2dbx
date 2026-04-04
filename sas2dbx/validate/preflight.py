@@ -52,6 +52,8 @@ _RE_SPARK_SQL_JOIN = re.compile(
     r'JOIN\s+([`"\']?[\w.]+[`"\']?)',
     re.IGNORECASE,
 )
+# Padrão para primeira linha de código spark. não-comentário (usado em inject_placeholder_bootstrap)
+_RE_SPARK_CODE_LINE = re.compile(r"^\s*spark\.")
 
 
 @dataclass
@@ -391,11 +393,9 @@ class PreflightChecker:
         # Itera linha por linha para evitar match dentro de comentários Python (#).
         insert_pos: int | None = None
         offset = 0
-        # Padrão: qualquer chamada spark. ou df = spark que não seja comentário
-        _CODE_PATTERN = re.compile(r"^\s*spark\.", re.MULTILINE)
         for line in content.splitlines(keepends=True):
             stripped = line.lstrip()
-            if not stripped.startswith("#") and _CODE_PATTERN.match(line):
+            if not stripped.startswith("#") and _RE_SPARK_CODE_LINE.match(line):
                 insert_pos = offset
                 break
             offset += len(line)

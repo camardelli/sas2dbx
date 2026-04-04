@@ -301,8 +301,6 @@ class NotebookFixer:
             f'spark.sql("CREATE TABLE IF NOT EXISTS {table_name} ({ddl}) USING DELTA")\n\n'
         )
 
-        content = notebook_path.read_text(encoding="utf-8")
-
         # Insere antes do primeiro spark.sql() ou # COMMAND ou df = spark
         insert_match = re.search(
             r"(spark\.sql\(|# COMMAND|df\s*=\s*spark)", content, re.MULTILINE

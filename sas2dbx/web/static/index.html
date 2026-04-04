@@ -1130,6 +1130,7 @@ async function pollValidation(id) {
       document.getElementById("btn-validate").disabled = true;
       document.getElementById("btn-validate").textContent = "Aguardando tabelas…";
       renderPipelineStep("deploy", "pending", "Deploy", "Aguardando criação das tabelas de origem…");
+      setTimeout(() => document.getElementById("btn-resume-validation").focus(), 100);
       renderPipelineStep("execution", "pending", "Execução", "—");
       renderPipelineStep("result",    "pending", "Resultado", "—");
       return;

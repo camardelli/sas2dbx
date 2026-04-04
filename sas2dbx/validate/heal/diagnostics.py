@@ -170,6 +170,8 @@ class DiagnosticsEngine:
             entities["column_name"] = col_match.group(1)
 
         # Coluna duplicada: "Output column <col> already exists"
+        # Sobrescreve column_name intencionalmente — este extrator é mais específico
+        # que o "cannot resolve" acima para erros de IllegalArgumentException
         dup_col_match = re.search(
             r"Output column\s+([\w]+)\s+already exists",
             error_message,

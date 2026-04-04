@@ -244,12 +244,6 @@ ERROR_PATTERNS: dict[str, ErrorPattern] = {
         "category": "output_column_exists",
         "deterministic_fix": "fix_output_column_exists",
         "severity": "HIGH",
-        "entity_extractors": {
-            "column_name": re.compile(
-                r"Output column\s+([\w]+)\s+already exists",
-                re.IGNORECASE,
-            ),
-        },
     },
     "rdd_not_allowed_serverless": {
         "pattern": re.compile(
