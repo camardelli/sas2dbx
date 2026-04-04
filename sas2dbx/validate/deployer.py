@@ -137,10 +137,18 @@ class DatabricksDeployer:
             self._client.jobs.reset(job_id=existing.job_id, new_settings=sdk_settings)
             return existing.job_id
 
-        response = self._client.jobs.create(
-            name=settings["name"],
-            tasks=settings["tasks"],
-        )
+        try:
+            from databricks.sdk.service.jobs import JobSettings
+            sdk_settings = JobSettings.from_dict(settings)
+            response = self._client.jobs.create(
+                name=sdk_settings.name,
+                tasks=sdk_settings.tasks,
+            )
+        except Exception:  # noqa: BLE001
+            response = self._client.jobs.create(
+                name=settings["name"],
+                tasks=settings["tasks"],
+            )
         return response.job_id
 
     def _build_job_settings(self, workspace_path: str, job_name: str) -> dict:
