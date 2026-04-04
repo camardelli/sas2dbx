@@ -8,10 +8,12 @@ import re
 # Template principal de transpilação
 # ---------------------------------------------------------------------------
 
-_TRANSPILE_TEMPLATE = """\
+# PP2-04: Parte estática do prompt — cacheada pelo Anthropic prompt caching.
+# Separada da parte dinâmica para maximizar cache hits entre chamadas da mesma migração.
+_SYSTEM_TEMPLATE = """\
 Você é um especialista em migração SAS para PySpark/Databricks.
 
-TAREFA: Converter o bloco SAS abaixo para código PySpark equivalente.
+TAREFA: Converter o bloco SAS fornecido para código PySpark equivalente.
 
 REGRAS:
 1. Use DataFrame API nativa (NUNCA RDDs ou UDFs desnecessárias)
@@ -46,14 +48,20 @@ CONTEXTO DO AMBIENTE:
 - Catalog: {catalog}
 - Schema: {schema}
 
+Responda APENAS com o código PySpark. Sem explicações fora dos comentários inline.\
+"""
+
+# Parte dinâmica: contexto do Knowledge Store + DICA + bloco SAS
+_USER_TEMPLATE = """\
 {context_section}\
 BLOCO SAS ({construct_type}):
 ```sas
 {sas_code}
-```
-
-Responda APENAS com o código PySpark. Sem explicações fora dos comentários inline.\
+```\
 """
+
+# Template legado unificado — mantido para compatibilidade com paths que não usam caching
+_TRANSPILE_TEMPLATE = _SYSTEM_TEMPLATE + "\n\n" + _USER_TEMPLATE
 
 # ---------------------------------------------------------------------------
 # Dicas especializadas por construct type
@@ -117,6 +125,58 @@ DICA PROC MEANS/SUMMARY: Converta para groupBy().agg().
 # ---------------------------------------------------------------------------
 
 
+def build_system_prompt(catalog: str = "main", schema: str = "migrated") -> str:
+    """PP2-04: Retorna a parte estática do prompt — candidata ao Anthropic prompt caching.
+
+    Deve ser enviada no campo `system` da API. Por ser idêntica entre blocos da mesma
+    migração, o Anthropic cache hit elimina o custo de input tokens do trecho estático.
+
+    Args:
+        catalog: Unity Catalog de destino.
+        schema: Schema de destino.
+
+    Returns:
+        System prompt pronto para uso.
+    """
+    return _SYSTEM_TEMPLATE.replace("{catalog}", catalog).replace("{schema}", schema)
+
+
+def build_user_message(
+    sas_code: str,
+    construct_type: str,
+    context_text: str = "",
+) -> str:
+    """PP2-04: Retorna a parte dinâmica do prompt (user message).
+
+    Contém contexto do Knowledge Store, dica de construct type e o bloco SAS.
+
+    Args:
+        sas_code: Código SAS do bloco a transpilar.
+        construct_type: Tipo do construct (ex: "PROC_SQL", "DATA_STEP_SIMPLE").
+        context_text: Contexto formatado do Knowledge Store (pode ser vazio).
+
+    Returns:
+        User message pronta para envio.
+    """
+    context_section = ""
+    if context_text.strip():
+        context_section = (
+            "REFERÊNCIA TÉCNICA (do Knowledge Store — use como ground truth):\n"
+            f"{context_text}\n\n"
+        )
+
+    hint = _CONSTRUCT_HINTS.get(construct_type, "")
+    if hint:
+        context_section += hint + "\n"
+
+    return (
+        _USER_TEMPLATE
+        .replace("{context_section}", context_section)
+        .replace("{construct_type}", construct_type)
+        .replace("{sas_code}", sas_code)
+    )
+
+
 def build_transpile_prompt(
     sas_code: str,
     construct_type: str,
@@ -125,6 +185,9 @@ def build_transpile_prompt(
     context_text: str = "",
 ) -> str:
     """Monta prompt completo para transpilação de um bloco SAS.
+
+    Mantido para compatibilidade. Para novos usos prefira build_system_prompt()
+    + build_user_message() para aproveitar prompt caching (PP2-04).
 
     Args:
         sas_code: Código SAS do bloco a transpilar.
@@ -136,28 +199,9 @@ def build_transpile_prompt(
     Returns:
         Prompt completo pronto para envio ao LLM.
     """
-    context_section = ""
-    if context_text.strip():
-        context_section = (
-            "REFERÊNCIA TÉCNICA (do Knowledge Store — use como ground truth):\n"
-            f"{context_text}\n\n"
-        )
-
-    # Injetar dica especializada por construct type, se disponível
-    hint = _CONSTRUCT_HINTS.get(construct_type, "")
-    if hint:
-        context_section += hint + "\n"
-
-    # Usar .replace() em vez de .format() para evitar KeyError/IndexError
-    # quando código SAS contém { } (macros, strings literais, hash objects, etc.)
-    return (
-        _TRANSPILE_TEMPLATE
-        .replace("{catalog}", catalog)
-        .replace("{schema}", schema)
-        .replace("{context_section}", context_section)
-        .replace("{construct_type}", construct_type)
-        .replace("{sas_code}", sas_code)
-    )
+    system = build_system_prompt(catalog, schema)
+    user = build_user_message(sas_code, construct_type, context_text)
+    return system + "\n\n" + user
 
 
 def strip_code_fences(text: str) -> str:

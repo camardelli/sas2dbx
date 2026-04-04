@@ -21,6 +21,9 @@ logger = logging.getLogger(__name__)
 # Limite de tokens para contexto injetado no prompt (configurável via sas2dbx.yaml)
 DEFAULT_MAX_CONTEXT_TOKENS = 2000
 
+# PP2-03: Claude usa ~3.5 chars/token (cl100k_base medido empiricamente)
+_CHARS_PER_TOKEN = 3.5
+
 
 def build_context(
     ks: KnowledgeStore,
@@ -31,11 +34,13 @@ def build_context(
     sas_reference_keys: list[tuple[str, str]] | None = None,
     pyspark_reference_keys: list[tuple[str, str]] | None = None,
     max_tokens: int = DEFAULT_MAX_CONTEXT_TOKENS,
+    sas_code: str = "",  # PP2-01: usado para batch harvest de funções desconhecidas
 ) -> dict[str, Any]:
     """Monta o contexto do Knowledge Store para o prompt de transpilação.
 
-    Usa *_or_harvest() para funções, PROCs, dialeto SQL e formatos —
-    habilitando harvest on-demand quando o KnowledgeStore tem llm_client.
+    PP2-01: Two-pass para funções — lookup rápido (sem LLM) depois batch harvest
+    para desconhecidas (1 chamada LLM em vez de N).
+    PP2-03: Budget calibrado para Claude (~3.5 chars/token).
 
     Args:
         ks: KnowledgeStore configurado (com ou sem llm_client).
@@ -46,6 +51,7 @@ def build_context(
         sas_reference_keys: Lista de (category, name) para docs SAS.
         pyspark_reference_keys: Lista de (category, name) para docs PySpark.
         max_tokens: Limite estimado de tokens para o contexto total.
+        sas_code: Código SAS do bloco — melhora precisão do batch harvest.
 
     Returns:
         Dict com chaves: function_mappings, proc_mappings, sql_dialect_notes,
@@ -60,8 +66,8 @@ def build_context(
         "pyspark_references": [],
     }
 
-    # Budget de tokens: 1 token ≈ 4 caracteres (estimativa conservadora)
-    _budget = max_tokens * 4
+    # PP2-03: budget calibrado — Claude ≈ 3.5 chars/token
+    _budget = int(max_tokens * _CHARS_PER_TOKEN)
 
     def _fits(value: Any) -> bool:
         """Verifica se `value` cabe no budget restante e desconta se sim."""
@@ -73,13 +79,24 @@ def build_context(
         logger.debug("ContextBuilder: budget esgotado, entrada omitida")
         return False
 
-    # Funções SAS → PySpark (com on-demand harvest)
-    for func in func_names or []:
-        result = ks.lookup_function_or_harvest(func)
-        if result is not None and _fits(result):
-            context["function_mappings"][func.upper()] = result
+    # PP2-01: funções — two-pass (lookup rápido + batch harvest dos desconhecidos)
+    if func_names:
+        unknown_funcs: list[str] = []
+        for func in func_names:
+            result = ks.lookup_function(func)  # sem LLM
+            if result is not None and _fits(result):
+                context["function_mappings"][func.upper()] = result
+            elif result is None:
+                unknown_funcs.append(func)
 
-    # PROCs SAS (com on-demand harvest)
+        # Batch harvest: 1 chamada LLM para todos os desconhecidos
+        if unknown_funcs:
+            batch = ks.batch_harvest_functions_sync(unknown_funcs, sas_code)
+            for func_upper, entry in batch.items():
+                if entry is not None and _fits(entry):
+                    context["function_mappings"][func_upper] = entry
+
+    # PROCs SAS (com on-demand harvest individual — PROCs são raros, custo baixo)
     for proc in proc_names or []:
         result = ks.lookup_proc_or_harvest(proc)
         if result is not None and _fits(result):
@@ -118,7 +135,7 @@ def build_context(
         len(context["proc_mappings"]),
         len(context["sql_dialect_notes"]),
         len(context["format_mappings"]),
-        _budget // 4,
+        int(_budget / _CHARS_PER_TOKEN),
     )
 
     return context

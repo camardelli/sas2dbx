@@ -104,16 +104,15 @@ _RE_ORDER_BY_WINDOW = re.compile(r'\.orderBy\(', re.IGNORECASE)
 class SemanticRiskAnalyzer:
     """Analisa notebooks PySpark gerados em busca de riscos semânticos."""
 
-    def analyze_notebook(self, notebook_path: Path) -> SemanticRiskReport:
-        """Analisa um notebook e retorna riscos detectados."""
-        report = SemanticRiskReport(notebook=notebook_path.stem)
-        try:
-            content = notebook_path.read_text(encoding="utf-8")
-        except OSError:
-            return report
+    def analyze_content(self, name: str, content: str) -> SemanticRiskReport:
+        """PP2-07: Analisa conteúdo de notebook em memória — evita re-leitura de disco.
 
+        Args:
+            name: Nome do notebook (sem extensão).
+            content: Conteúdo do arquivo .py já em memória.
+        """
+        report = SemanticRiskReport(notebook=name)
         lines = content.splitlines()
-
         self._check_join_cardinality(content, lines, report)
         self._check_date_as_string(content, lines, report)
         self._check_filter_null(content, lines, report)
@@ -121,8 +120,15 @@ class SemanticRiskAnalyzer:
         self._check_unsafe_cast(content, lines, report)
         self._check_append_dedup(content, lines, report)
         self._check_rownum_order(content, lines, report)
-
         return report
+
+    def analyze_notebook(self, notebook_path: Path) -> SemanticRiskReport:
+        """Analisa um notebook a partir do disco."""
+        try:
+            content = notebook_path.read_text(encoding="utf-8")
+        except OSError:
+            return SemanticRiskReport(notebook=notebook_path.stem)
+        return self.analyze_content(notebook_path.stem, content)
 
     def analyze_directory(self, output_dir: Path) -> list[SemanticRiskReport]:
         """Analisa todos os notebooks .py em output_dir."""

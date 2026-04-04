@@ -40,7 +40,7 @@ class _FakeProvider(LLMProvider):
     def is_available(self) -> bool:
         return True
 
-    async def complete(self, prompt: str, max_tokens: int, temperature: float, timeout: float = 120.0) -> LLMResponse:
+    async def complete(self, prompt: str, max_tokens: int, temperature: float, timeout: float = 120.0, system: str | None = None) -> LLMResponse:
         self._calls += 1
         result = self._responses[min(self._calls - 1, len(self._responses) - 1)]
         if isinstance(result, Exception):

@@ -252,11 +252,16 @@ class LLMHarvester:
         return _run_sync(self.harvest_all())
 
     async def harvest_all(self) -> HarvestReport:
-        """Processa todos os arquivos de mapeamento LLM em sequência.
+        """PP2-08: Processa todos os arquivos de mapeamento LLM em paralelo via asyncio.gather.
+
+        Cada arquivo é independente — rodar em paralelo reduz o tempo total de harvest
+        de N × latência_média para ≈ 1 × latência_máxima.
 
         Returns:
             HarvestReport com estatísticas agregadas.
         """
+        import asyncio
+
         from sas2dbx.transpile.llm.client import LLMClient
 
         client = LLMClient(self._llm_config)
@@ -264,10 +269,21 @@ class LLMHarvester:
 
         self._generated_dir.mkdir(parents=True, exist_ok=True)
 
-        for filename in _LLM_TARGET_FILES:
+        async def _process_file(filename: str) -> tuple[str, dict, int, int, Exception | None]:
             logger.info("LLMHarvester: processando %s", filename)
             try:
                 entries, tokens, skipped = await self._harvest_file(client, filename)
+                return filename, entries, tokens, skipped, None
+            except Exception as exc:  # noqa: BLE001
+                logger.error("LLMHarvester: erro em %s — %s", filename, exc)
+                return filename, {}, 0, 0, exc
+
+        results = await asyncio.gather(*[_process_file(fn) for fn in _LLM_TARGET_FILES])
+
+        for filename, entries, tokens, skipped, exc in results:
+            if exc is not None:
+                report.errors.append(f"{filename}: {exc}")
+            else:
                 self._write_generated(filename, entries)
                 report.sources_processed.append(filename)
                 report.entries_per_file[filename] = len(entries)
@@ -280,10 +296,6 @@ class LLMHarvester:
                     skipped,
                     tokens,
                 )
-            except Exception as exc:  # noqa: BLE001
-                msg = f"{filename}: {exc}"
-                report.errors.append(msg)
-                logger.error("LLMHarvester: erro em %s — %s", filename, exc)
 
         return report
 

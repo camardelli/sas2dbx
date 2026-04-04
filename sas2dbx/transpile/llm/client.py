@@ -83,8 +83,14 @@ class LLMProvider(ABC):
         max_tokens: int,
         temperature: float,
         timeout: float = 120.0,
+        system: str | None = None,
     ) -> LLMResponse:
         """Envia prompt e retorna resposta.
+
+        Args:
+            prompt: User message (parte dinâmica).
+            system: System prompt estático — quando fornecido, o AnthropicProvider
+                    aplica cache_control para prompt caching (PP2-04).
 
         Raises:
             LLMRateLimitError: em rate limit (recuperável via retry).
@@ -140,15 +146,16 @@ class LLMClient:
     # Public API
     # ------------------------------------------------------------------
 
-    def complete_sync(self, prompt: str) -> LLMResponse:
+    def complete_sync(self, prompt: str, system: str | None = None) -> LLMResponse:
         """Versão síncrona de `complete()` — conveniência para código não-async."""
-        return asyncio.run(self.complete(prompt))
+        return asyncio.run(self.complete(prompt, system=system))
 
-    async def complete(self, prompt: str) -> LLMResponse:
+    async def complete(self, prompt: str, system: str | None = None) -> LLMResponse:
         """Envia prompt ao provider configurado com retry e fallback.
 
         Args:
-            prompt: Texto completo do prompt.
+            prompt: User message (parte dinâmica do prompt).
+            system: System prompt estático para prompt caching (PP2-04). Opcional.
 
         Returns:
             LLMResponse com content, provider_used, tokens_used e latency_ms.
@@ -157,13 +164,13 @@ class LLMClient:
             LLMProviderError: quando todos os providers e tentativas esgotam.
         """
         try:
-            return await self._complete_with_retry(self._primary, prompt)
+            return await self._complete_with_retry(self._primary, prompt, system=system)
         except LLMGatewayError as exc:
             if self._fallback and self._fallback.is_available():
                 logger.warning(
                     "LLMClient: gateway error (%s) — fallback para AnthropicProvider", exc
                 )
-                return await self._complete_with_retry(self._fallback, prompt)
+                return await self._complete_with_retry(self._fallback, prompt, system=system)
             raise
 
     # ------------------------------------------------------------------
@@ -171,7 +178,7 @@ class LLMClient:
     # ------------------------------------------------------------------
 
     async def _complete_with_retry(
-        self, provider: LLMProvider, prompt: str
+        self, provider: LLMProvider, prompt: str, system: str | None = None
     ) -> LLMResponse:
         """Executa chamada ao provider com exponential backoff em rate limit e gateway errors."""
         last_exc: Exception | None = None
@@ -182,6 +189,7 @@ class LLMClient:
                     max_tokens=self._config.max_tokens,
                     temperature=self._config.temperature,
                     timeout=self._config.timeout,
+                    system=system,
                 )
             except LLMRateLimitError as exc:
                 last_exc = exc

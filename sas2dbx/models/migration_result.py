@@ -89,3 +89,4 @@ class MigrationResult:
     error: str | None = None
     completed_at: str | None = None
     validation_result: ValidationResult | None = None
+    notebook_content: str | None = None  # PP2-07: conteúdo em memória para evitar re-leitura

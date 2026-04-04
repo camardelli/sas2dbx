@@ -90,22 +90,28 @@ _RE_CREATE_OR_REPLACE = re.compile(
 class IdempotencyAnalyzer:
     """Analisa notebooks PySpark em busca de operações não-idempotentes."""
 
-    def analyze_notebook(self, notebook_path: Path) -> IdempotencyReport:
-        """Analisa um notebook e retorna relatório de idempotência."""
-        report = IdempotencyReport(notebook=notebook_path.stem)
-        try:
-            content = notebook_path.read_text(encoding="utf-8")
-        except OSError:
-            return report
+    def analyze_content(self, name: str, content: str) -> IdempotencyReport:
+        """PP2-07: Analisa conteúdo de notebook em memória — evita re-leitura de disco.
 
+        Args:
+            name: Nome do notebook (sem extensão).
+            content: Conteúdo do arquivo .py já em memória.
+        """
+        report = IdempotencyReport(notebook=name)
         lines = content.splitlines()
-
         self._check_append_writes(content, lines, report)
         self._check_missing_overwrite(content, lines, report)
         self._check_insert_without_merge(content, lines, report)
         self._count_safe_writes(content, report)
-
         return report
+
+    def analyze_notebook(self, notebook_path: Path) -> IdempotencyReport:
+        """Analisa um notebook a partir do disco."""
+        try:
+            content = notebook_path.read_text(encoding="utf-8")
+        except OSError:
+            return IdempotencyReport(notebook=notebook_path.stem)
+        return self.analyze_content(notebook_path.stem, content)
 
     def analyze_directory(self, output_dir: Path) -> list[IdempotencyReport]:
         """Analisa todos os notebooks .py em output_dir."""

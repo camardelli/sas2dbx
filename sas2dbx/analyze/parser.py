@@ -54,10 +54,11 @@ _RE_DATA_HEADER = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 
-# DATA step inputs: SET, MERGE, UPDATE
+# DATA step inputs: SET, MERGE, UPDATE — PP2-09: combined single-pass regex
 _RE_SET = re.compile(r"\bSET\s+" + _DS_NAME, re.IGNORECASE)
 _RE_MERGE = re.compile(r"\bMERGE\s+" + _DS_NAME, re.IGNORECASE)
 _RE_UPDATE = re.compile(r"\bUPDATE\s+" + _DS_NAME, re.IGNORECASE)
+_RE_DATA_INPUT = re.compile(r"\b(?:SET|MERGE|UPDATE)\s+" + _DS_NAME, re.IGNORECASE)
 
 # PROC: DATA= parameter (source dataset in proc header)
 _RE_PROC_DATA = re.compile(r"\bDATA\s*=\s*" + _DS_NAME, re.IGNORECASE)
@@ -190,12 +191,11 @@ def _extract_datastep_proc_deps(code: str, deps: BlockDeps) -> None:
                 if ds and ds not in deps.outputs:
                     deps.outputs.append(ds)
 
-        # Inputs: SET, MERGE, UPDATE
-        for pattern in (_RE_SET, _RE_MERGE, _RE_UPDATE):
-            for m in pattern.finditer(code):
-                ds = _normalize_ds(m.group(1))
-                if ds and ds not in deps.inputs:
-                    deps.inputs.append(ds)
+        # Inputs: SET, MERGE, UPDATE — PP2-09: single-pass regex
+        for m in _RE_DATA_INPUT.finditer(code):
+            ds = _normalize_ds(m.group(1))
+            if ds and ds not in deps.inputs:
+                deps.inputs.append(ds)
     else:
         # PROC: DATA= → input, OUT= → output
         for m in _RE_PROC_DATA.finditer(code):

@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -45,6 +46,7 @@ class MigrationStateManager:
     def __init__(self, output_dir: Path) -> None:
         self._path = output_dir / _STATE_FILENAME
         self._state: dict = {}
+        self._lock = threading.Lock()  # PP2-06: thread-safety para transpilação paralela
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -176,18 +178,25 @@ class MigrationStateManager:
     # ------------------------------------------------------------------
 
     def _set_job(self, job_id: str, entry: dict) -> None:
-        if "jobs" not in self._state:
-            self._state["jobs"] = {}
-        self._state["jobs"][job_id] = entry
-        self._save()
+        with self._lock:
+            if "jobs" not in self._state:
+                self._state["jobs"] = {}
+            self._state["jobs"][job_id] = entry
+            self._save_locked()
 
-    def _save(self) -> None:
+    def _save_locked(self) -> None:
+        """Grava state em disco — deve ser chamado com self._lock adquirido."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self._path.with_suffix(".tmp")
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(self._state, f, indent=2, ensure_ascii=False)
         os.replace(tmp, self._path)
         logger.debug("StateManager: state gravado em %s", self._path)
+
+    def _save(self) -> None:
+        """Grava state em disco (adquire lock internamente)."""
+        with self._lock:
+            self._save_locked()
 
 
 def _now_iso() -> str:

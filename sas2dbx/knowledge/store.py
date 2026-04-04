@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +57,7 @@ class KnowledgeStore:
         self._single_harvester: object | None = None   # instância cacheada de LLMSingleHarvester
         self._harvest_failures: set[str] | None = None # lazy-loaded do disco
         self._enriched_count: int = 0                  # contagem de enriquecimentos pós-transpilação
+        self._harvest_lock = threading.Lock()          # PP2-06: protege harvest concorrente
 
     # -------------------------------------------------------------------------
     # Lookup — deterministic, no LLM
@@ -280,6 +282,16 @@ class KnowledgeStore:
         self._cache.clear()
         self._ref_cache.clear()
 
+    def _invalidate_file(self, filename: str) -> None:
+        """PP2-02: Invalida apenas as entradas de cache referentes a `filename`.
+
+        Evita zerar todo o cache após cada harvest on-demand — preserva mappings
+        de outros arquivos já carregados na sessão.
+        """
+        for base in (self._mappings_generated, self._mappings_merged):
+            key = str(base / filename)
+            self._cache.pop(key, None)
+
     # -------------------------------------------------------------------------
     # Internal — on-demand harvest (H.2)
     # -------------------------------------------------------------------------
@@ -334,7 +346,8 @@ class KnowledgeStore:
                 return None
 
             self._append_to_generated(filename, key, entry)
-            self.invalidate_cache()
+            # PP2-02: invalidação seletiva — só o arquivo atualizado, não todo o cache
+            self._invalidate_file(filename)
 
             logger.info(
                 "KnowledgeStore: on-demand harvest OK — %s '%s' (confidence=%.2f)",
@@ -493,13 +506,17 @@ class KnowledgeStore:
         if self._llm_client is None or not unknown_funcs:
             return 0
 
-        failures = self._load_harvest_failures()
-        # Filtra funções já tentadas (nesta sessão ou em sessões anteriores)
-        to_enrich = [
-            f for f in unknown_funcs
-            if f"function:{f}" not in self._harvest_attempted
-            and f"function:{f}" not in failures
-        ]
+        # Fase 1 (com lock): filtra e pré-marca
+        with self._harvest_lock:
+            failures = self._load_harvest_failures()
+            to_enrich = [
+                f for f in unknown_funcs
+                if f"function:{f}" not in self._harvest_attempted
+                and f"function:{f}" not in failures
+            ]
+            for f in to_enrich:
+                self._harvest_attempted.add(f"function:{f}")  # pré-marca
+
         if not to_enrich:
             return 0
 
@@ -508,6 +525,7 @@ class KnowledgeStore:
             len(to_enrich), ", ".join(to_enrich[:8]),
         )
 
+        # Fase 2 (sem lock): chamada ao LLM
         try:
             harvester = self._get_single_harvester()
             entries = harvester.harvest_from_context_sync(
@@ -519,31 +537,109 @@ class KnowledgeStore:
             logger.warning("KnowledgeStore: enriquecimento falhou: %s", exc)
             return 0
 
+        # Fase 3 (com lock): persiste resultados
         added = 0
-        for func_name, entry in (entries or {}).items():
-            cache_key = f"function:{func_name.upper()}"
-            self._harvest_attempted.add(cache_key)
-            if entry is not None:
-                self._append_to_generated("functions_map.yaml", func_name.upper(), entry)
-                added += 1
-                logger.debug("KnowledgeStore: enriquecimento OK — %s", func_name)
-            else:
-                self._record_harvest_failure(cache_key)
-
-        # Funções em to_enrich que não apareceram na resposta do LLM
         returned_keys = {k.upper() for k in (entries or {})}
-        for func_name in to_enrich:
-            if func_name.upper() not in returned_keys:
-                self._record_harvest_failure(f"function:{func_name.upper()}")
+        with self._harvest_lock:
+            for func_name, entry in (entries or {}).items():
+                cache_key = f"function:{func_name.upper()}"
+                if entry is not None:
+                    self._append_to_generated("functions_map.yaml", func_name.upper(), entry)
+                    added += 1
+                    logger.debug("KnowledgeStore: enriquecimento OK — %s", func_name)
+                else:
+                    self._record_harvest_failure(cache_key)
+
+            for func_name in to_enrich:
+                if func_name.upper() not in returned_keys:
+                    self._record_harvest_failure(f"function:{func_name.upper()}")
+
+            if added > 0:
+                self._invalidate_file("functions_map.yaml")
+                self._enriched_count += added
 
         if added > 0:
-            self.invalidate_cache()
-            self._enriched_count += added
             logger.info(
                 "KnowledgeStore: %d função(ões) adicionada(s) à KB via enriquecimento", added
             )
 
         return added
+
+    def batch_harvest_functions_sync(
+        self,
+        func_names: list[str],
+        sas_code: str = "",
+    ) -> dict[str, dict | None]:
+        """PP2-01 + PP2-06: Batch harvest thread-safe — 1 chamada LLM para N funções.
+
+        Pré-marca funções como tentadas antes da chamada LLM (lock curto),
+        faz a chamada sem lock (não bloqueia outras threads), e persiste
+        resultados com lock.
+
+        Args:
+            func_names: Lista de nomes de funções SAS para resolver.
+            sas_code: Código SAS do bloco (contexto para o LLM).
+
+        Returns:
+            Dict {func_upper: entry_or_None} para cada função solicitada.
+        """
+        if self._llm_client is None or not func_names:
+            return {}
+
+        # Fase 1 (com lock): filtra e pré-marca como tentado para evitar duplicate harvest
+        with self._harvest_lock:
+            failures = self._load_harvest_failures()
+            to_harvest: list[str] = []
+            for fn in func_names:
+                cache_key = f"function:{fn.upper()}"
+                if cache_key in self._harvest_attempted or cache_key in failures:
+                    logger.debug("KnowledgeStore: batch skip %s (já tentado/failure)", fn)
+                else:
+                    to_harvest.append(fn)
+                    self._harvest_attempted.add(cache_key)  # pré-marca
+
+        if not to_harvest:
+            return {}
+
+        logger.info(
+            "KnowledgeStore: batch harvest %d função(ões): %s",
+            len(to_harvest),
+            ", ".join(to_harvest),
+        )
+
+        # Fase 2 (sem lock): chamada ao LLM — não bloqueia outras threads
+        try:
+            harvester = self._get_single_harvester()
+            entries = harvester.harvest_from_context_sync(
+                func_names=to_harvest,
+                sas_code=sas_code,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("KnowledgeStore: batch harvest falhou: %s", exc)
+            return {}
+
+        # Fase 3 (com lock): persiste resultados
+        result: dict[str, dict | None] = {}
+        returned_keys = {k.upper() for k in (entries or {})}
+        with self._harvest_lock:
+            for func_name, entry in (entries or {}).items():
+                cache_key = f"function:{func_name.upper()}"
+                if entry is not None:
+                    self._append_to_generated("functions_map.yaml", func_name.upper(), entry)
+                    result[func_name.upper()] = entry
+                else:
+                    self._record_harvest_failure(cache_key)
+                    result[func_name.upper()] = None
+
+            for fn in to_harvest:
+                if fn.upper() not in returned_keys:
+                    self._record_harvest_failure(f"function:{fn.upper()}")
+                    result[fn.upper()] = None
+
+            if any(v is not None for v in result.values()):
+                self._invalidate_file("functions_map.yaml")
+
+        return result
 
     async def _on_demand_harvest_async(
         self,
@@ -589,7 +685,7 @@ class KnowledgeStore:
                 return None
 
             self._append_to_generated(filename, key, entry)
-            self.invalidate_cache()
+            self._invalidate_file(filename)
 
             logger.info(
                 "KnowledgeStore: async harvest OK — %s '%s' (confidence=%.2f)",

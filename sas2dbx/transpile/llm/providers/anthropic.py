@@ -37,8 +37,13 @@ class AnthropicProvider(LLMProvider):
         max_tokens: int,
         temperature: float,
         timeout: float = 120.0,
+        system: str | None = None,
     ) -> LLMResponse:
         """Chama a API Anthropic e retorna LLMResponse.
+
+        PP2-04: Quando `system` é fornecido, aplica cache_control=ephemeral no system prompt
+        para ativar Anthropic prompt caching — reduz custo de input tokens em ~90% para o
+        trecho estático entre chamadas consecutivas da mesma migração.
 
         Raises:
             LLMRateLimitError: em HTTP 429.
@@ -51,6 +56,19 @@ class AnthropicProvider(LLMProvider):
             raise LLMProviderError(
                 "Pacote 'anthropic' não instalado. Execute: pip install anthropic"
             ) from exc
+
+        # PP2-04: system com cache_control para prompt caching
+        system_param: list[dict] | anthropic.NotGiven
+        if system:
+            system_param = [
+                {
+                    "type": "text",
+                    "text": system,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
+        else:
+            system_param = anthropic.NOT_GIVEN
 
         t0 = time.monotonic()
         try:
@@ -65,25 +83,22 @@ class AnthropicProvider(LLMProvider):
                 timeout=http_timeout,
                 max_retries=0,
             ) as client:
+                kwargs: dict = {
+                    "model": self._model,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                    "messages": [{"role": "user", "content": prompt}],
+                }
+                if system_param is not anthropic.NOT_GIVEN:
+                    kwargs["system"] = system_param
+
                 if max_tokens >= 4096:
                     # Streaming para requests longos: evita que proxies/Cloudflare cortem
                     # conexões idle enquanto o modelo ainda está gerando a resposta.
-                    # stream.get_final_message() aguarda o fim do stream e retorna o objeto
-                    # messages.Message completo — compatível com o path normal abaixo.
-                    async with client.messages.stream(
-                        model=self._model,
-                        max_tokens=max_tokens,
-                        temperature=temperature,
-                        messages=[{"role": "user", "content": prompt}],
-                    ) as stream:
+                    async with client.messages.stream(**kwargs) as stream:
                         message = await stream.get_final_message()
                 else:
-                    message = await client.messages.create(
-                        model=self._model,
-                        max_tokens=max_tokens,
-                        temperature=temperature,
-                        messages=[{"role": "user", "content": prompt}],
-                    )
+                    message = await client.messages.create(**kwargs)
         except anthropic.RateLimitError as exc:
             raise LLMRateLimitError(str(exc), status_code=429) from exc
         except anthropic.APIStatusError as exc:

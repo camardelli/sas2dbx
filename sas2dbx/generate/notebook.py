@@ -110,17 +110,12 @@ class DatabricksPyRenderer(NotebookRenderer):
       - Células de código são escritas diretamente
     """
 
-    def render(self, model: CellModel, output_path: Path) -> None:
-        output_path = output_path.with_suffix(".py")
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-
+    def render_to_string(self, model: CellModel) -> str:
+        """PP2-07: Serializa CellModel para string sem escrever em disco."""
         lines: list[str] = ["# Databricks notebook source\n"]
-
         header_cell = _build_header_cell(model)
         imports_cell = _build_imports_cell(model)
-
         all_cells = [header_cell, imports_cell] + sorted(model.cells, key=lambda c: c.order)
-
         for cell in all_cells:
             lines.append(_PY_MAGIC_SEPARATOR)
             if cell.cell_type == CellType.MARKDOWN:
@@ -129,8 +124,13 @@ class DatabricksPyRenderer(NotebookRenderer):
                     lines.append(f"{_PY_MAGIC_MD_PREFIX}{md_line}\n")
             else:
                 lines.append(cell.source.rstrip("\n") + "\n")
+        return "".join(lines)
 
-        output_path.write_text("".join(lines), encoding="utf-8")
+    def render(self, model: CellModel, output_path: Path) -> None:
+        output_path = output_path.with_suffix(".py")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        content = self.render_to_string(model)
+        output_path.write_text(content, encoding="utf-8")
         logger.info("DatabricksPyRenderer: notebook gravado em %s", output_path)
 
 
@@ -240,6 +240,25 @@ class NotebookGenerator:
         """
         self._renderer.render(model, output_path)
         return output_path.with_suffix(f".{self._format}")
+
+    def generate_with_content(self, model: CellModel, output_path: Path) -> tuple[Path, str | None]:
+        """PP2-07: Gera o notebook e retorna (path, content_str) para uso in-memory.
+
+        Para o formato .py, retorna o conteúdo sem releitura de disco.
+        Para outros formatos, content é None (analyzers não suportam .ipynb).
+
+        Returns:
+            (caminho_gerado, conteúdo_str_ou_None)
+        """
+        if isinstance(self._renderer, DatabricksPyRenderer):
+            content = self._renderer.render_to_string(model)
+            actual_path = output_path.with_suffix(".py")
+            actual_path.parent.mkdir(parents=True, exist_ok=True)
+            actual_path.write_text(content, encoding="utf-8")
+            return actual_path, content
+        # Outros formatos: delega ao render normal
+        self._renderer.render(model, output_path)
+        return output_path.with_suffix(f".{self._format}"), None
 
 
 # ---------------------------------------------------------------------------

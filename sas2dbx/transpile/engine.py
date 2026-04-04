@@ -12,7 +12,9 @@ from __future__ import annotations
 import datetime
 import logging
 import re
+import threading
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -22,7 +24,12 @@ from sas2dbx.ingest.reader import read_sas_file, split_blocks
 from sas2dbx.models.migration_result import JobStatus, MigrationResult, SASOrigin
 from sas2dbx.models.sas_ast import SASBlock, SASFile, Tier
 from sas2dbx.transpile.llm.context import build_context, format_context_for_prompt
-from sas2dbx.transpile.llm.prompts import build_transpile_prompt, strip_code_fences
+from sas2dbx.transpile.llm.prompts import (
+    build_system_prompt,
+    build_transpile_prompt,
+    build_user_message,
+    strip_code_fences,
+)
 from sas2dbx.transpile.llm.validator import validate_pyspark
 from sas2dbx.transpile.state import MigrationStateManager
 
@@ -77,6 +84,8 @@ class TranspilationEngine:
         self._generator = NotebookGenerator(notebook_format=notebook_format)
         self._on_progress = on_progress
         self._ks_harvest_baseline: int = 0  # H.3: baseline de _harvest_attempted antes de run()
+        # PP2-04: system prompt pré-calculado uma vez por engine instance — cacheado pela Anthropic
+        self._system_prompt: str = build_system_prompt(catalog, schema)
 
     def run(self, sas_files: list[SASFile], execution_order: list[str]) -> list[MigrationResult]:
         """Executa a transpilação de todos os jobs na ordem fornecida.
@@ -114,42 +123,63 @@ class TranspilationEngine:
             len(execution_order),
         )
 
-        results: list[MigrationResult] = []
+        # Resultados em dict para reordenar de acordo com execution_order
+        results_map: dict[str, MigrationResult] = {}
+        _progress_lock = threading.Lock()  # protege on_progress (pode ser não thread-safe)
 
+        def _run_job(job_id: str) -> MigrationResult:
+            sas_file = file_map.get(job_id)
+            if sas_file is None:
+                logger.warning("Engine: job '%s' não encontrado em sas_files — pulando", job_id)
+                return MigrationResult(job_id=job_id, status=JobStatus.FAILED, error="arquivo não encontrado")
+
+            with _progress_lock:
+                if self._on_progress:
+                    self._on_progress(job_id, "running")
+            self._state.mark_started(job_id)
+
+            result = self._transpile_job(job_id, sas_file)
+
+            if result.status == JobStatus.DONE:
+                self._state.mark_done(job_id, result)
+                with _progress_lock:
+                    if self._on_progress:
+                        self._on_progress(job_id, "done")
+            else:
+                self._state.mark_failed(job_id, result.error or "erro desconhecido")
+                with _progress_lock:
+                    if self._on_progress:
+                        self._on_progress(job_id, "failed")
+            return result
+
+        # PP2-06: jobs são independentes durante transpilação (dependências são de execução,
+        # não de geração de código) — paralelizar com ThreadPoolExecutor
+        # Usa max 4 workers para não saturar a API do LLM
+        max_workers = min(4, len(jobs_to_run)) if jobs_to_run else 1
+
+        # Jobs já concluídos (resume) — não entram no pool
         for job_id in execution_order:
             if job_id not in jobs_to_run:
-                result = MigrationResult(
+                results_map[job_id] = MigrationResult(
                     job_id=job_id,
                     status=JobStatus.DONE,
                     confidence=1.0
                     if self._state.get_job_status(job_id) == JobStatus.DONE
                     else 0.0,
                 )
-                results.append(result)
-                if self._on_progress:
-                    self._on_progress(job_id, "skipped")
-                continue
+                with _progress_lock:
+                    if self._on_progress:
+                        self._on_progress(job_id, "skipped")
 
-            sas_file = file_map.get(job_id)
-            if sas_file is None:
-                logger.warning("Engine: job '%s' não encontrado em sas_files — pulando", job_id)
-                continue
+        if jobs_to_run:
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                future_to_job = {pool.submit(_run_job, jid): jid for jid in jobs_to_run}
+                for future in as_completed(future_to_job):
+                    result = future.result()
+                    results_map[result.job_id] = result
 
-            if self._on_progress:
-                self._on_progress(job_id, "running")
-
-            self._state.mark_started(job_id)
-            result = self._transpile_job(job_id, sas_file)
-            results.append(result)
-
-            if result.status == JobStatus.DONE:
-                self._state.mark_done(job_id, result)
-                if self._on_progress:
-                    self._on_progress(job_id, "done")
-            else:
-                self._state.mark_failed(job_id, result.error or "erro desconhecido")
-                if self._on_progress:
-                    self._on_progress(job_id, "failed")
+        # Reordena para preservar execution_order na saída
+        results = [results_map[jid] for jid in execution_order if jid in results_map]
 
         # H.3 — Auto-merge: se on-demand harvests ocorreram, reconstruir merged/
         self._maybe_rebuild_mappings()
@@ -213,14 +243,15 @@ class TranspilationEngine:
                         )
                         context_text = format_context_for_prompt(ctx)
 
-                    prompt = build_transpile_prompt(
+                    # PP2-04: user message dinâmico + system prompt estático (cacheado)
+                    user_msg = build_user_message(
                         sas_code=block.raw_code,
                         construct_type=classification.construct_type,
-                        catalog=self._catalog,
-                        schema=self._schema,
                         context_text=context_text,
                     )
-                    response = self._llm_client.complete_sync(prompt)
+                    response = self._llm_client.complete_sync(
+                        user_msg, system=self._system_prompt
+                    )
                     pyspark_code = strip_code_fences(response.content)
                     confidence_scores.append(classification.confidence)
 
@@ -273,7 +304,8 @@ class TranspilationEngine:
             )
 
             output_path = self._output_dir / job_id
-            actual_path = self._generator.generate(model, output_path)
+            # PP2-07: gera notebook e captura conteúdo em memória para analyzers
+            actual_path, notebook_content = self._generator.generate_with_content(model, output_path)
 
             all_code = "\n".join(c.source for c in cells if c.cell_type == CellType.CODE)
             validation = validate_pyspark(all_code)
@@ -297,6 +329,7 @@ class TranspilationEngine:
                 output_path=str(actual_path),
                 warnings=warnings,
                 validation_result=validation,
+                notebook_content=notebook_content,
             )
 
         except Exception as exc:
@@ -338,6 +371,7 @@ class TranspilationEngine:
             func_names=func_names,
             proc_names=proc_names,
             sql_constructs=sql_constructs,
+            sas_code=raw_code,  # PP2-01: contexto para batch harvest de funções desconhecidas
         )
 
     def _maybe_rebuild_mappings(self) -> None:

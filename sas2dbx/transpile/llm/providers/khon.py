@@ -45,6 +45,7 @@ class KhonGatewayProvider(LLMProvider):
         max_tokens: int,
         temperature: float,
         timeout: float = 120.0,
+        system: str | None = None,
     ) -> LLMResponse:
         """Chama o gateway Khon e retorna LLMResponse.
 
@@ -53,12 +54,16 @@ class KhonGatewayProvider(LLMProvider):
             LLMGatewayError: em HTTP 5xx ou erro de conexão.
             LLMProviderError: em outros erros HTTP.
         """
-        payload = json.dumps({
+        body_dict: dict = {
             "model": self._model,
             "max_tokens": max_tokens,
             "temperature": temperature,
             "messages": [{"role": "user", "content": prompt}],
-        }).encode("utf-8")
+        }
+        if system:
+            body_dict["system"] = system
+
+        payload = json.dumps(body_dict).encode("utf-8")
 
         req = urllib.request.Request(
             url=f"{self._url}/v1/messages",

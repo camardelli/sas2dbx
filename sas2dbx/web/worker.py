@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 import threading
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from sas2dbx.knowledge.global_catalog import GlobalCatalog
@@ -816,8 +817,17 @@ class MigrationWorker:
             )
 
         # 4c — GAP-C: análise de idempotência dos notebooks gerados
+        # PP2-07: usa conteúdo em memória dos MigrationResults para evitar re-leitura de disco
         from sas2dbx.analyze.idempotency import IdempotencyAnalyzer
-        idempotency_reports = IdempotencyAnalyzer().analyze_directory(output_dir)
+        _idp_analyzer = IdempotencyAnalyzer()
+        _content_map = {r.job_id: r.notebook_content for r in migration_results if r.notebook_content}
+        if _content_map:
+            idempotency_reports = [
+                _idp_analyzer.analyze_content(name, content)
+                for name, content in _content_map.items()
+            ]
+        else:
+            idempotency_reports = _idp_analyzer.analyze_directory(output_dir)
         idempotency_issues = [
             {"notebook": r.notebook, "summary": r.summary(),
              "issues": [{"type": i.issue_type, "description": i.description,
@@ -835,8 +845,19 @@ class MigrationWorker:
             )
 
         # 4d — GAP-E: riscos semânticos nos notebooks gerados
+        # PP2-07: idem — conteúdo em memória quando disponível
         from sas2dbx.validate.semantic_risk import SemanticRiskAnalyzer
-        semantic_reports = SemanticRiskAnalyzer().analyze_directory(output_dir)
+        _sr_analyzer = SemanticRiskAnalyzer()
+        if _content_map:
+            semantic_reports = [
+                r for r in (
+                    _sr_analyzer.analyze_content(name, content)
+                    for name, content in _content_map.items()
+                )
+                if r.has_risks
+            ]
+        else:
+            semantic_reports = _sr_analyzer.analyze_directory(output_dir)
         semantic_risks = [
             {"notebook": r.notebook, "summary": r.summary(),
              "risks": [{"code": risk.code, "description": risk.description,
@@ -898,32 +919,41 @@ class MigrationWorker:
             migration_id, n_jobs, "sim" if has_llm else "stub",
         )
 
-        for idx, sas_file in enumerate(sas_files):
-            job_name = sas_file.path.stem
-            step("document", "running", f"{job_name} ({idx + 1}/{n_jobs})")
+        # PP2-05: Geração de documentação paralela — cada chamada ao LLM é independente
+        step("document", "running", f"0/{n_jobs} jobs documentados")
+
+        def _doc_one(sas_file_item):  # noqa: ANN001
+            jname = sas_file_item.path.stem
             try:
-                logger.info("MigrationWorker [%s]: documentando %s...", migration_id, job_name)
-                doc_result = doc_engine.generate_doc_sync(
-                    job_name=job_name,
-                    sas_code=jobs_code[job_name],
-                    block_deps=jobs_block_deps.get(job_name, []),
-                    classification_results=jobs_classifications.get(job_name, []),
+                logger.info("MigrationWorker [%s]: documentando %s...", migration_id, jname)
+                result = doc_engine.generate_doc_sync(
+                    job_name=jname,
+                    sas_code=jobs_code[jname],
+                    block_deps=jobs_block_deps.get(jname, []),
+                    classification_results=jobs_classifications.get(jname, []),
                     graph=graph,
                 )
-                doc_engine.write_doc(doc_result, jobs_dir)
-                job_docs[job_name] = doc_result.content
+                doc_engine.write_doc(result, jobs_dir)
                 logger.info(
                     "MigrationWorker [%s]: doc gerada para %s (tokens=%d)",
-                    migration_id, job_name, doc_result.tokens_used,
+                    migration_id, jname, result.tokens_used,
                 )
+                return jname, result.content, None
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "MigrationWorker [%s]: falha ao documentar %s: %s",
-                    migration_id,
-                    job_name,
-                    exc,
+                    migration_id, jname, exc,
                 )
-                job_docs[job_name] = f"# {job_name}\n\n*Documentação não gerada: {exc}*\n"
+                return jname, f"# {jname}\n\n*Documentação não gerada: {exc}*\n", exc
+
+        completed_count = 0
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            futures = {pool.submit(_doc_one, sf): sf for sf in sas_files}
+            for fut in as_completed(futures):
+                jname, content, _err = fut.result()
+                job_docs[jname] = content
+                completed_count += 1
+                step("document", "running", f"{completed_count}/{n_jobs} jobs documentados")
 
         step("document", "done", f"{n_jobs} job(s) documentados")
 
