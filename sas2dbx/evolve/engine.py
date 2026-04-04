@@ -73,12 +73,13 @@ class EvolutionEngine:
         unresolved_dir: Path | None = None,
         test_timeout: int = 120,
         catalog_dir: Path | None = None,
+        kb: object | None = None,
     ) -> None:
         # catalog_dir: onde quarantine.json e evolution_history.json são persistidos.
         # Separa dados persistentes do project_root para suportar ambientes Docker
         # onde project_root aponta para o código-fonte e o volume montado é outro path.
         _catalog = catalog_dir or (project_root / "sas2dbx_work" / "catalog")
-        self._analyzer = EvolutionAnalyzer(llm_client, project_root)
+        self._analyzer = EvolutionAnalyzer(llm_client, project_root, kb=kb)
         self._gate = QualityGate(project_root, test_timeout)
         self._applier = FixApplier(
             project_root,

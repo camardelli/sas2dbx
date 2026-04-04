@@ -235,6 +235,17 @@ ERROR_PATTERNS: dict[str, ErrorPattern] = {
         "deterministic_fix": "fix_overwrite_schema",
         "severity": "HIGH",
     },
+    "rdd_not_allowed_serverless": {
+        "pattern": re.compile(
+            r"NOT_IMPLEMENTED.*PySpark RDDs"
+            r"|Using custom code using PySpark RDDs is not allowed on serverless"
+            r"|RDDs.*not.*allowed.*serverless",
+            re.IGNORECASE,
+        ),
+        "category": "rdd_not_allowed",
+        "deterministic_fix": "fix_rdd_flatmap",
+        "severity": "HIGH",
+    },
 }
 
 

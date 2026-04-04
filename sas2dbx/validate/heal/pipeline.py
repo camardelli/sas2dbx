@@ -12,6 +12,7 @@ from sas2dbx.validate.config import DatabricksConfig
 from sas2dbx.validate.executor import ExecutionResult
 from sas2dbx.validate.heal.advisor import FixSuggestion, HealingAdvisor
 from sas2dbx.validate.heal.diagnostics import ErrorDiagnostic
+from sas2dbx.validate.heal.knowledge_base import HealingKnowledgeBase
 
 logger = logging.getLogger(__name__)
 
@@ -62,12 +63,14 @@ class SelfHealingPipeline:
         max_iterations: int = 2,
         on_progress: Callable[..., None] | None = None,
         healing_history: list[dict] | None = None,
+        kb: HealingKnowledgeBase | None = None,
     ) -> None:
         self._config = config
         self._llm_config = llm_config
         self._max_iterations = max_iterations
         self._on_progress = on_progress
         self._healing_history: list[dict] = healing_history or []
+        self._kb = kb
 
     def heal(
         self,
@@ -149,6 +152,33 @@ class SelfHealingPipeline:
 
             suggestion = advisor.suggest_fix_sync(notebook_path, current_result)
             last_suggestion = suggestion
+
+            # Registra tentativa no KB
+            if self._kb is not None and suggestion.diagnostic is not None:
+                _error_key = self._kb.compute_error_key(suggestion.diagnostic)
+                # Usa description truncada como identificador do fix (único campo descritivo disponível)
+                _fix_name = (suggestion.description or suggestion.strategy or "none")[:80]
+                _retest_ok = (
+                    suggestion.retest_result is not None
+                    and suggestion.retest_result.improved
+                )
+                self._kb.record_attempt(
+                    error_category=suggestion.diagnostic.category,
+                    error_key=_error_key,
+                    fix_name=_fix_name,
+                    job_id=notebook_path.stem,
+                    result="success" if _retest_ok else "failed",
+                    reason=str(current_result.error or "")[:300],
+                )
+                if self._kb.is_stuck(suggestion.diagnostic.category, _error_key):
+                    logger.warning(
+                        "SelfHealingPipeline: KB detectou loop para %s/%s — interrompendo iterações",
+                        suggestion.diagnostic.category, _error_key,
+                    )
+                    # Interrompe o loop: continuar re-aplicando o mesmo fix que falhou
+                    # N vezes é desperdício de recursos e não converge.
+                    last_suggestion = suggestion
+                    break
 
             # Retest foi bem-sucedido?
             if suggestion.retest_result is not None and suggestion.retest_result.improved:

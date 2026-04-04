@@ -57,9 +57,11 @@ _RE_CONF_GET_DEFAULT = re.compile(
 _RE_CONF_GET_NO_DEFAULT = re.compile(
     r'spark\.conf\.get\(\s*["\'][\w.]+["\']\s*\)'
 )
-# Linhas de AUTO-FIX e CREATE TABLE/SCHEMA adicionados pelo healing
+# Linhas de AUTO-FIX e CREATE TABLE/SCHEMA adicionados pelo healing.
+# NOTA: # [AUTO-FIX D3] é preservado — contém withColumn em memória (seguro e necessário).
+# Somente blocos ALTER TABLE acumulados (tag [AUTO-FIX] simples) são removidos.
 _RE_AUTOFIX_LINE = re.compile(
-    r"^\s*(?:# \[AUTO-FIX\]|spark\.sql\(\"CREATE (?:TABLE|SCHEMA) IF NOT EXISTS)"
+    r"^\s*(?:# \[AUTO-FIX\](?! D3)|spark\.sql\(\"CREATE (?:TABLE|SCHEMA) IF NOT EXISTS)"
 )
 
 

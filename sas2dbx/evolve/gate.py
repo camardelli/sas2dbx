@@ -73,6 +73,20 @@ class QualityGate:
         Returns:
             GateResult com decision e reason.
         """
+        # Etapa 0: Pré-validação de old_string — rejeita imediatamente propostas
+        # com action=modify cujo old_string não existe no arquivo.
+        # Evita rodar sandbox caro para propostas que falharão no FixApplier.apply().
+        old_string_check = self._check_old_strings(proposal)
+        if old_string_check:
+            logger.info(
+                "QualityGate: REJECT por old_string não encontrado: %s",
+                old_string_check[:200],
+            )
+            return GateResult(
+                "REJECT",
+                f"old_string não encontrado no arquivo — proposta rejeitada: {old_string_check}",
+            )
+
         # Etapa 1: Teste obrigatório
         if not proposal.test:
             return GateResult("REJECT", "Proposta sem teste — rejeitada (sem teste)")
@@ -141,6 +155,29 @@ class QualityGate:
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
+
+    def _check_old_strings(self, proposal: EvolutionProposal) -> str | None:
+        """Verifica que todo action=modify com old_string tem a string presente no arquivo.
+
+        Retorna mensagem de erro se algum old_string não for encontrado. None = OK.
+        Isso evita que propostas do EvolutionEngine com old_string desatualizado
+        passem pelo sandbox (custoso) para só falhar no FixApplier.apply().
+        """
+        for fm in proposal.files_to_modify:
+            if fm.action != "modify" or not fm.old_string:
+                continue
+            target = self._root / fm.path
+            if not target.exists():
+                # Arquivo não existe — o apply vai criar; old_string irrelevante
+                continue
+            try:
+                existing = target.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            if fm.old_string not in existing:
+                preview = fm.old_string[:80].replace("\n", "\\n")
+                return f"'{fm.path}': '{preview}'"
+        return None
 
     def _check_file_scope(self, proposal: EvolutionProposal) -> str | None:
         """Retorna mensagem de erro se algum arquivo viola o escopo. None = OK."""

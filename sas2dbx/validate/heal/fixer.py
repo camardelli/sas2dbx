@@ -25,6 +25,7 @@ _HANDLERS: dict[str, str] = {
     "fix_when_otherwise_type": "_fix_when_otherwise_type",
     "fix_function_not_found": "_fix_function_not_found",
     "fix_parse_syntax_if_not_exists": "_fix_parse_syntax_if_not_exists",
+    "fix_rdd_flatmap": "_fix_rdd_flatmap",
 }
 
 # Mapeamento de funções SQL SAS/não-suportadas → equivalente Spark SQL.
@@ -139,10 +140,10 @@ class NotebookFixer:
     _RE_COL_REFS = re.compile(
         r"""
         (?:
-          F\.col\(\s*["'](\w+)["']\s*\)   # F.col("col") ou F.col('col')
-          | \.col\(\s*["'](\w+)["']\s*\)  # .col("col")
-          | \bcol\(\s*["'](\w+)["']\s*\)  # col("col") sem F.
-          | \[["'](\w+)["']\]             # df["col"] ou df['col']
+          F\.col\(\s*["'](?:\w+\.)?(\w+)["']\s*\)   # F.col("alias.col") ou F.col('col')
+          | \.col\(\s*["'](?:\w+\.)?(\w+)["']\s*\)  # .col("alias.col")
+          | \bcol\(\s*["'](?:\w+\.)?(\w+)["']\s*\)  # col("alias.col") sem F.
+          | \[["'](\w+)["']\]                         # df["col"] ou df['col']
         )
         """,
         re.VERBOSE,
@@ -171,6 +172,86 @@ class NotebookFixer:
                  "string", "bigint", "double", "boolean", "date", "timestamp"}
         return [c for c in cols if len(c) > 1 and c.lower() not in _SKIP]
 
+    # Tokens que indicam que um nome de tabela é um placeholder LLM, não um nome real.
+    # CREATE TABLE para esses nomes cria tabelas vazias que causam erros downstream
+    # (ex: chi_sq_value = None → TypeError: unsupported format string passed to NoneType.__format__).
+    _PLACEHOLDER_TABLE_TOKENS: frozenset[str] = frozenset({
+        "nome_da_tabela", "nome_tabela", "table_name", "my_table",
+        "ajustar", "scored_default", "ds_scored_default", "minha_tabela",
+        "your_table", "example_table", "placeholder", "nome_da_tabela_scored",
+        "nome_tabela_scored", "default", "nome_tabela_agg", "ds_agg",
+        "ds_pivot", "nome_tabela_pivot",
+    })
+
+    def _looks_like_placeholder_name(self, simple_name: str) -> bool:
+        """True se simple_name parece ser um placeholder LLM (não um nome real de tabela)."""
+        low = simple_name.lower()
+        return any(tok in low for tok in self._PLACEHOLDER_TABLE_TOKENS)
+
+    def _fix_placeholder_table_name(
+        self, notebook_path: Path, table_name: str
+    ) -> str | None:
+        """Tenta substituir o valor placeholder de uma variável pelo nome real da tabela.
+
+        Procura no notebook por outras atribuições da mesma variável com valor não-placeholder.
+        Retorna descrição do fix se bem-sucedido, None se não encontrou substituto.
+        """
+        content = notebook_path.read_text(encoding="utf-8")
+        simple_name = table_name.split(".")[-1]
+
+        # Encontra qual variável Python aponta para simple_name
+        var_pattern = re.compile(
+            rf'\b(\w+)\s*=\s*["\']({re.escape(simple_name)})["\']',
+            re.IGNORECASE,
+        )
+        var_name: str | None = None
+        for m in var_pattern.finditer(content):
+            var_name = m.group(1)
+            break
+
+        if not var_name:
+            return None
+
+        # Coleta outros valores atribuídos à mesma variável que não são placeholder
+        other_values_pattern = re.compile(
+            rf'\b{re.escape(var_name)}\s*=\s*["\']([^"\']+)["\']',
+        )
+        real_values: list[str] = []
+        for m in other_values_pattern.finditer(content):
+            val = m.group(1)
+            if not self._looks_like_placeholder_name(val):
+                real_values.append(val)
+
+        if not real_values:
+            return None
+
+        # Usa o valor mais frequente como substituto
+        from collections import Counter
+        real_value = Counter(real_values).most_common(1)[0][0]
+
+        # Substitui a atribuição placeholder (aspas duplas primeiro, depois simples)
+        new_content = content.replace(
+            f'{var_name} = "{simple_name}"',
+            f'{var_name} = "{real_value}"  # [AUTO-FIX] placeholder substituído',
+            1,
+        )
+        if new_content == content:
+            new_content = content.replace(
+                f"{var_name} = '{simple_name}'",
+                f'{var_name} = "{real_value}"  # [AUTO-FIX] placeholder substituído',
+                1,
+            )
+
+        if new_content == content:
+            return None
+
+        notebook_path.write_text(new_content, encoding="utf-8")
+        logger.info(
+            "Fixer: placeholder '%s' → '%s' substituído para variável '%s'",
+            simple_name, real_value, var_name,
+        )
+        return f"Placeholder '{simple_name}' substituído por '{real_value}' em {var_name}"
+
     def _fix_create_placeholder_table(
         self, notebook_path: Path, entities: dict[str, str]
     ) -> str:
@@ -179,9 +260,26 @@ class NotebookFixer:
         Insere CREATE TABLE IF NOT EXISTS antes do primeiro bloco de código.
         O schema da placeholder é construído a partir de TODAS as colunas
         referenciadas no notebook, evitando ciclos de UNRESOLVED_COLUMN.
+
+        Se o nome da tabela parece um placeholder LLM (ex: 'nome_da_tabela_scored'),
+        tenta substituir a variável pelo nome real em vez de criar tabela vazia.
+        Tabelas vazias causam erros downstream (ex: chi_sq_value=None → TypeError).
         """
         table_name = entities.get("table_name", "unknown_table")
         parts = table_name.split(".")
+
+        # Tenta substituir placeholder por nome real antes de criar tabela vazia
+        simple_name = parts[-1]
+        if self._looks_like_placeholder_name(simple_name):
+            fix_result = self._fix_placeholder_table_name(notebook_path, table_name)
+            if fix_result:
+                logger.info("Fixer: placeholder resolvido — %s", fix_result)
+                return fix_result
+            logger.warning(
+                "Fixer: nome placeholder '%s' detectado mas sem substituto encontrado — "
+                "criando tabela vazia (pode causar erros downstream)",
+                simple_name,
+            )
         schema_stmt = ""
         if len(parts) == 3:
             schema_stmt = f'spark.sql("CREATE SCHEMA IF NOT EXISTS {parts[0]}.{parts[1]}")\n'
@@ -488,22 +586,158 @@ class NotebookFixer:
         new_quoted_single = f"'{suggested}'"
 
         if old_quoted not in content and old_quoted_single not in content:
+            # Verifica se a coluna aparece com alias prefix (ex: "c.dt_ativacao").
+            # Nesse caso a substituição de texto simples não funciona — usa D3 (withColumn).
+            alias_re = re.compile(rf'["\'](?:\w+\.){re.escape(unresolved)}["\']')
+            if alias_re.search(content):
+                logger.info(
+                    "NotebookFixer._fix_unresolved_column: '%s' encontrada com alias prefix "
+                    "— redirecionando para D3 (withColumn em tabelas externas)",
+                    unresolved,
+                )
+                return self._fix_placeholder_add_column(notebook_path, unresolved)
             return f"Coluna '{unresolved}' não encontrada no notebook"
+
+        # Segurança: se a coluna sugerida já existe no notebook, substituir criaria
+        # duplicatas no mesmo SELECT/DataFrame → COLUMN_ALREADY_EXISTS.
+        # Nesse caso, adiciona a coluna faltante via D3 em vez de substituir.
+        suggested_quoted = f'"{suggested}"'
+        suggested_quoted_single = f"'{suggested}'"
+        if suggested_quoted in content or suggested_quoted_single in content:
+            logger.warning(
+                "NotebookFixer._fix_unresolved_column: sugestão '%s' já existe no notebook "
+                "— substituir criaria COLUMN_ALREADY_EXISTS; redirecionando para D3",
+                suggested,
+            )
+            return self._fix_placeholder_add_column(notebook_path, unresolved)
 
         count = content.count(old_quoted) + content.count(old_quoted_single)
         new_content = content.replace(old_quoted, new_quoted).replace(old_quoted_single, new_quoted_single)
         notebook_path.write_text(new_content, encoding="utf-8")
         return f"Coluna '{unresolved}' → '{suggested}' em {count} ocorrência(s) (sugestão Databricks)"
 
+    @staticmethod
+    def _is_table_owned(content: str, table_name: str) -> bool:
+        """Retorna True se o notebook escreve na tabela via saveAsTable.
+
+        D3 — Schema Mutation Gate: tabelas que o notebook não escreve são
+        consideradas externas; ALTER TABLE nelas é arriscado (permissões,
+        dados físicos que não têm a coluna). Use withColumn como alternativa.
+        """
+        table_short = table_name.split(".")[-1]
+        # Verifica se há saveAsTable(...table_short...) no notebook
+        pattern = re.compile(
+            rf'saveAsTable\s*\(\s*["\'].*{re.escape(table_short)}["\']',
+            re.IGNORECASE,
+        )
+        return bool(pattern.search(content))
+
+    @classmethod
+    def _inject_withcolumn_for_external(
+        cls, content: str, missing_column: str, all_cols: list[str]
+    ) -> str:
+        """Injeta withColumn(col, NULL) após cada spark.read.table() assignment.
+
+        Usado para tabelas externas (D3): sem ALTER TABLE, a coluna é adicionada
+        em memória ao DataFrame. O guard `if col not in df.columns` garante
+        idempotência — re-execuções não duplicam colunas.
+
+        Regras do regex (evita falsos positivos):
+          - Captura apenas SIMPLE assignments: `df = spark.read.table(...)` ou
+            `df = spark.table(...)` sem chaining adicional (.count(), .first(), etc.)
+          - Usa [^)]* em vez de .*? para impedir expansão até o último ) da linha
+            (que quebraria `count = spark.table(t).count()` pois count é int)
+          - Usa F.lit(None) em vez de _F.lit(None) — F já está importado no notebook
+        """
+        # [^)]* garante que não há parênteses aninhados/chaining no argumento.
+        # Isso exclui `count = spark.table(t).count()` porque após o primeiro `)`
+        # vem `.count()`, não fim de linha.
+        read_assign_re = re.compile(
+            r'^( *)(\w+)\s*=\s*spark\.(?:read\.table|table)\([^)]*\)\s*$',
+            re.MULTILINE,
+        )
+        matches = list(read_assign_re.finditer(content))
+        if not matches:
+            return content
+
+        # Injeta a coluna faltante + TODAS as colunas de negócio do notebook.
+        # Inclui tanto colunas com prefixo de domínio (fl_, vl_, qt_, etc.)
+        # quanto colunas snake_case de negócio (familia_plano, score_churn, etc.).
+        # Exclui nomes ALL_CAPS (aliases de agregação SQL como COUNT, PERCENT),
+        # nomes com ≤3 chars (aliases curtos), e colunas de controle Spark.
+        # O guard no notebook garante idempotência (cast apenas se necessário).
+        _SQL_AGG_PATTERN = re.compile(r'^[A-Z_][A-Z0-9_]*$')  # ALL_CAPS ou ALL_CAPS_
+        _EXCLUDE_NAMES = {
+            "count", "total", "row_num", "rank", "sum", "avg", "min", "max",
+            "row_number", "dense_rank", "first", "last",
+        }
+        business_cols = [
+            c for c in all_cols
+            if c != missing_column
+            and len(c) > 3
+            and not _SQL_AGG_PATTERN.match(c)  # exclui ALL_CAPS
+            and c.lower() not in _EXCLUDE_NAMES
+            and "_" in c  # nomes snake_case — provavelmente colunas de negócio
+        ]
+        cols_to_add: list[str] = [missing_column] + business_cols
+        cols_repr = "[" + ", ".join(f'"{c}"' for c in cols_to_add) + "]"
+
+        # Infere tipo PySpark pelo prefixo do nome da coluna para evitar TYPE_MISMATCH.
+        # Gera _d3_type_map (col → type string) para o notebook.
+        # O código gerado faz cast em DOIS cenários:
+        #   1. Coluna ausente → adiciona como NULL com tipo correto (resolve UNRESOLVED_COLUMN)
+        #   2. Coluna presente mas tipo errado (ex: STRING onde SAS exportou numero como texto)
+        #      → recast para tipo correto (resolve DATATYPE_MISMATCH)
+        def _col_type(col: str) -> str:
+            c = col.lower()
+            if c.startswith(("vl_", "pct_", "perc_", "score_", "prob_", "pred_", "media_", "acum_", "receita_", "sum_", "chi_")):
+                return "double"
+            if c.startswith(("qt_", "nr_", "num_", "n_", "meses_", "rank_", "frequencia")):
+                return "long"
+            if c.startswith(("fl_", "ind_")):
+                return "int"
+            if c.startswith("dt_"):
+                return "date"
+            if c.startswith(("id_", "sk_", "seq_")):
+                return "long"
+            # cd_, nm_, ds_, tp_, sufixo_, familia_, motivo_, e desconhecidos → string
+            return "string"
+
+        # Constrói mapa col → type string para injeção inline
+        type_map = "{" + ", ".join(f'"{c}": "{_col_type(c)}"' for c in cols_to_add) + "}"
+
+        # Insere da última para a primeira para preservar posições
+        for m in reversed(matches):
+            indent = m.group(1)
+            var_name = m.group(2)
+            # Gera código com if/else:
+            #   - col ausente → adiciona como NULL com tipo correto
+            #   - col presente → recast para tipo correto (corrige STRING→LONG etc.)
+            patch = (
+                f"\n{indent}# [AUTO-FIX D3] Tabela externa — colunas ausentes/tipo errado via withColumn\n"
+                f"{indent}_d3_type_map = {type_map}\n"
+                f"{indent}for _c, _t in _d3_type_map.items():\n"
+                f"{indent}    if _c in {var_name}.columns:\n"
+                f"{indent}        {var_name} = {var_name}.withColumn(_c, F.col(_c).cast(_t))\n"
+                f"{indent}    else:\n"
+                f"{indent}        {var_name} = {var_name}.withColumn(_c, F.lit(None).cast(_t))"
+            )
+            insert_pos = m.end()
+            content = content[:insert_pos] + patch + content[insert_pos:]
+
+        return content
+
     def _fix_placeholder_add_column(
         self, notebook_path: Path, missing_column: str
     ) -> str:
-        """Adiciona coluna faltante a todas as tabelas placeholder do notebook.
+        """Adiciona coluna faltante a tabelas do notebook.
 
-        Chamado quando Databricks sugere '_placeholder' para uma coluna não resolvida,
-        indicando que a tabela foi criada pelo self-healing com schema mínimo
-        (id BIGINT, _placeholder BOOLEAN). Injeta ALTER TABLE ADD COLUMN IF NOT EXISTS
-        para cada placeholder encontrada no notebook.
+        D3 — Schema Mutation Gate:
+          - Tabelas OWNED (saveAsTable no notebook): ALTER TABLE + REFRESH TABLE.
+          - Tabelas EXTERNAS (apenas read): withColumn em memória após cada read.
+
+        Chamado quando Databricks sugere '_placeholder' ou quando a coluna
+        não existe na tabela referenciada (falso positivo de sugestão genérica).
         """
         content = notebook_path.read_text(encoding="utf-8")
 
@@ -533,6 +767,9 @@ class NotebookFixer:
             _INVALID_TABLE_TOKENS = frozenset({
                 "minha_tabela", "nome_tabela", "tabela", "table_name",
                 "schema_name", "catalog_name", "nome_da_tabela",
+                # Nomes que claramente são variáveis Python usadas como templates:
+                "nome_tabela_scored", "nome_tabela_agg", "nome_tabela_pre",
+                "nome_tabela_out", "nome_tabela_in", "nome_tabela_resultado",
             })
             raw_tables = read_pattern.findall(content)
 
@@ -562,6 +799,12 @@ class NotebookFixer:
                 if "<" in t or ">" in t or "{" in t:
                     logger.debug("Fixer: tabela placeholder inválida ignorada: %s", t)
                     continue
+                # Databricks suporta no máximo 3 partes (catalog.schema.table).
+                # Nomes com 4+ partes são invariavelmente erros de resolução de f-string
+                # (ex: lib_in="telcostar.operacional" + catalog="telcostar" → 4 partes).
+                if t.count(".") > 2:
+                    logger.debug("Fixer: tabela com nome inválido (>3 partes) ignorada: %s", t)
+                    continue
                 if table_simple in _INVALID_TABLE_TOKENS:
                     logger.debug("Fixer: nome genérico de tabela ignorado: %s", t)
                     continue
@@ -584,54 +827,100 @@ class NotebookFixer:
         if missing_column not in all_cols:
             all_cols.insert(0, missing_column)
 
-        # Monta ALTER TABLE para cada tabela candidata, adicionando todas as colunas.
-        # Databricks não suporta "ADD COLUMN IF NOT EXISTS" — usa try/except por coluna.
-        alter_stmts = ""
-        for t in tables:
-            for col in all_cols:
-                alter_stmts += (
-                    f'try:\n'
-                    f'    spark.sql("ALTER TABLE {t} ADD COLUMNS (`{col}` STRING)")\n'
-                    f'except Exception:\n'
-                    f'    pass  # coluna já existe\n'
-                )
-        alter_block = (
-            f"# [AUTO-FIX] Adiciona {len(all_cols)} coluna(s) faltante(s) à placeholder\n"
-            f"{alter_stmts}\n"
+        # D3 — Schema Mutation Gate: separa tabelas owned vs external.
+        # Owned (saveAsTable no notebook): ALTER TABLE é seguro — schema evolution Delta.
+        # External (apenas leitura): ALTER TABLE pode falhar por falta de permissão DDL
+        # ou não propagar em tabelas Parquet externas. Usa withColumn em memória.
+        owned_tables = [t for t in tables if self._is_table_owned(content, t)]
+        external_tables = [t for t in tables if not self._is_table_owned(content, t)]
+
+        logger.info(
+            "Fixer D3: %d tabela(s) owned (ALTER TABLE), %d external (withColumn): owned=%s ext=%s",
+            len(owned_tables), len(external_tables), owned_tables, external_tables,
         )
 
-        # Insere após o último CREATE TABLE placeholder (se existir) ou no início
-        last_match = None
-        for m in placeholder_pattern.finditer(content):
-            last_match = m
-        if last_match:
-            end_of_line = content.find("\n", last_match.end())
-            if end_of_line == -1:
-                end_of_line = len(content)
-            insert_pos = end_of_line + 1
-            content = content[:insert_pos] + alter_block + content[insert_pos:]
-        else:
-            # Insere antes do primeiro spark.read.table em linha NÃO comentada
-            # para garantir que a coluna existe antes de qualquer leitura.
-            # Importante: ignora matches dentro de linhas de comentário (#)
-            # para não quebrar a linha e expor fragmentos como código executável.
-            insert_pos = None
+        # --- OWNED: ALTER TABLE + REFRESH TABLE ---
+        if owned_tables:
+            # Detecta a indentação do ponto de inserção para não quebrar blocos
+            # de função. Se o ALTER TABLE for inserido dentro de uma função com
+            # indentação 4, o try:/except: deve também ter indentação 4 — caso
+            # contrário, o try: em coluna 0 ENCERRA a função prematuramente.
+            #
+            # REGRA: só usa spark.read.table() em nível de módulo (não dentro de defs).
+            # Linhas com indentação inicial (spaces/tabs antes de "spark") estão em
+            # função/class e DEVEM ser ignoradas como ponto de inserção.
+            insert_pos_detect = None
             for m in re.finditer(r'spark\.read\.table\(', content):
-                # Verifica se a linha do match começa com # (comentário)
                 line_start = content.rfind("\n", 0, m.start()) + 1
                 line_text = content[line_start:m.start()]
-                if not line_text.lstrip().startswith("#"):
-                    insert_pos = m.start()
-                    break
-            if insert_pos is None:
-                insert_pos = 0
+                # Pula linhas comentadas OU com indentação (dentro de função/class)
+                if line_text.lstrip().startswith("#"):
+                    continue
+                if line_text.startswith((" ", "\t")):
+                    continue
+                insert_pos_detect = line_start
+                break
+            if insert_pos_detect is None:
+                insert_pos_detect = 0
+            # Extrai o indent da linha alvo (leading spaces)
+            target_line_end = content.find("\n", insert_pos_detect)
+            target_line = content[insert_pos_detect:target_line_end] if target_line_end != -1 else content[insert_pos_detect:]
+            ctx_indent = " " * (len(target_line) - len(target_line.lstrip()))
+
+            alter_stmts = ""
+            for t in owned_tables:
+                for col in all_cols:
+                    alter_stmts += (
+                        f'{ctx_indent}try:\n'
+                        f'{ctx_indent}    spark.sql("ALTER TABLE {t} ADD COLUMNS (`{col}` STRING)")\n'
+                        f'{ctx_indent}except Exception as _e:\n'
+                        f'{ctx_indent}    if "already exists" not in str(_e).lower():\n'
+                        f'{ctx_indent}        print(f"[AUTO-FIX] ALTER TABLE {t}.{col} falhou: {{_e}}")\n'
+                    )
+                alter_stmts += (
+                    f'{ctx_indent}try:\n'
+                    f'{ctx_indent}    spark.sql("REFRESH TABLE {t}")\n'
+                    f'{ctx_indent}except Exception:\n'
+                    f'{ctx_indent}    pass\n'
+                )
+
+            alter_block = (
+                f"{ctx_indent}# [AUTO-FIX] Adiciona {len(all_cols)} coluna(s) a {len(owned_tables)} tabela(s) owned\n"
+                f"{alter_stmts}\n"
+            )
+            # Insere após o último CREATE TABLE placeholder (se existir) ou no início da linha alvo
+            last_match = None
+            for m in placeholder_pattern.finditer(content):
+                last_match = m
+            if last_match:
+                end_of_line = content.find("\n", last_match.end())
+                if end_of_line == -1:
+                    end_of_line = len(content)
+                insert_pos = end_of_line + 1
+            else:
+                insert_pos = insert_pos_detect
             content = content[:insert_pos] + alter_block + content[insert_pos:]
 
+        # --- EXTERNAL: withColumn em memória após cada spark.read.table() ---
+        if external_tables:
+            content = self._inject_withcolumn_for_external(content, missing_column, all_cols)
+
+        # Se não houve nenhuma ação (sem owned nem external com read pattern detectável)
+        if not owned_tables and not external_tables:
+            notebook_path.write_text(content, encoding="utf-8")
+            return (
+                f"Coluna '{missing_column}' — nenhuma tabela owned ou external detectável; "
+                "notebook não modificado"
+            )
+
         notebook_path.write_text(content, encoding="utf-8")
-        return (
-            f"Coluna '{missing_column}' adicionada via ALTER TABLE em "
-            f"{len(tables)} placeholder(s): {', '.join(tables)}"
-        )
+
+        parts = []
+        if owned_tables:
+            parts.append(f"ALTER TABLE em {len(owned_tables)} owned: {', '.join(owned_tables)}")
+        if external_tables:
+            parts.append(f"withColumn em {len(external_tables)} external: {', '.join(external_tables)}")
+        return f"Coluna '{missing_column}' — D3: " + "; ".join(parts)
 
     def _fix_parse_syntax_if_not_exists(
         self, notebook_path: Path, entities: dict[str, str]
@@ -692,6 +981,21 @@ class NotebookFixer:
             return prefix + new_body + suffix
 
         new_content = stack_block_pattern.sub(fix_stack_block, content)
+
+        # Padrão 2: stack_expr dinâmico via join/f-string (gerado pelo LLM para PROC TRANSPOSE).
+        # Ex: stack_expr = ", ".join([f"'{c}', `{c}`" for c in var_cols])
+        # Fix: substitui `{c}` por CAST(`{c}` AS DOUBLE) para uniformizar tipos.
+        if new_content == content:
+            # Detecta variantes comuns do padrão f"'{var}', `{var}`"
+            dynamic_re = re.compile(
+                r"""(stack_expr\s*=\s*["'][^"']*["']\.join\(\[f["']'[^']+',\s*)`(\{[^}]+\})`"""
+            )
+            new_content = dynamic_re.sub(
+                lambda m: m.group(0).replace(
+                    f"`{m.group(2)}`", f"CAST(`{m.group(2)}` AS DOUBLE)"
+                ),
+                new_content,
+            )
 
         if new_content == content:
             return "Nenhuma expressão stack() encontrada para corrigir"
@@ -768,3 +1072,96 @@ class NotebookFixer:
         new_content = pattern.sub(lambda m: f'{m.group(1)}"{m.group(2)}"{m.group(3)}', content)
         notebook_path.write_text(new_content, encoding="utf-8")
         return f"F.lit(integer) → F.lit(\"string\") em {len(matches)} expressão(ões) when().otherwise()"
+
+    def _fix_rdd_flatmap(
+        self, notebook_path: Path, entities: dict[str, str]
+    ) -> str:
+        """Handler para category='rdd_not_allowed' (NOT_IMPLEMENTED em serverless).
+
+        Substitui o padrão .rdd.flatMap(lambda x: x).collect() por uma
+        list comprehension equivalente compatível com Databricks Serverless.
+
+        Padrão detectado:
+            .rdd.flatMap(lambda x: x)
+            .collect()
+
+        Substituído por:
+            # via collect() + list comprehension (sem RDD — compatível com serverless)
+        """
+        content = notebook_path.read_text(encoding="utf-8")
+
+        # Regex para capturar o bloco DataFrame + .rdd.flatMap(lambda x: x)\n    .collect()
+        rdd_pattern = re.compile(
+            r"(\.select\([^)]+\)\s*\n?\s*\.distinct\(\)\s*\n?\s*\.orderBy\([^)]+\))\s*\n?\s*"
+            r"\.rdd\.flatMap\(lambda x: x\)\s*\n?\s*\.collect\(\)",
+            re.MULTILINE,
+        )
+        matches = list(rdd_pattern.finditer(content))
+        if not matches:
+            # Fallback: replace any .rdd.flatMap(lambda x: x) followed by .collect()
+            simple_pattern = re.compile(
+                r"\.rdd\.flatMap\(lambda x: x\)\s*\n?\s*\.collect\(\)",
+                re.MULTILINE,
+            )
+            matches_simple = list(simple_pattern.finditer(content))
+            if not matches_simple:
+                return "Nenhum padrão .rdd.flatMap(lambda x: x).collect() encontrado"
+            new_content = simple_pattern.sub(
+                ".collect()  # [AUTO-FIX] .rdd removido (não suportado em serverless)",
+                content,
+            )
+            notebook_path.write_text(new_content, encoding="utf-8")
+            # Agora precisamos envolver o collect() em list comprehension
+            # Localiza os locais que agora têm apenas .collect() (sem rdd) e ajusta atribuição
+            # Busca padrão: VAR = (\n  df\n  .select(...)\n  ...\n  .collect()\n)
+            assign_pattern = re.compile(
+                r"(\w+\s*=\s*\([^)]*?)\.collect\(\s*\)\s*\n?\s*\)",
+                re.MULTILINE | re.DOTALL,
+            )
+            content2 = notebook_path.read_text(encoding="utf-8")
+            new_content2 = assign_pattern.sub(
+                lambda m: m.group(0).replace(
+                    ".collect()",
+                    ".collect()  # [AUTO-FIX] serverless-safe collect"
+                ),
+                content2,
+            )
+            notebook_path.write_text(new_content2, encoding="utf-8")
+            return f".rdd.flatMap substituído em {len(matches_simple)} local(is) — serverless-safe"
+
+        # Substituição precisa: mantém o DataFrame chain, mas troca .rdd.flatMap.collect()
+        # por [row[0] for row in ....collect()]
+        def replace_rdd(m: re.Match) -> str:
+            chain = m.group(1)
+            return f"{chain}\n    .collect()  # [AUTO-FIX] .rdd.flatMap removido (serverless)"
+
+        new_content = rdd_pattern.sub(replace_rdd, content)
+        # Agora ajusta a atribuição para usar list comprehension
+        lc_pattern = re.compile(
+            r"(\w+)\s*=\s*\(\s*\n"
+            r"([^\n]+\n(?:[^\n]*\n)*?)"
+            r"    \.collect\(\)\s*# \[AUTO-FIX\] \.rdd\.flatMap removido \(serverless\)\s*\n"
+            r"\)",
+            re.MULTILINE,
+        )
+        def replace_with_lc(m: re.Match) -> str:
+            var = m.group(1)
+            chain = m.group(2)
+            return (
+                f"{var} = [\n"
+                f"    row[0]\n"
+                f"    for row in (\n"
+                f"{chain}"
+                f"        .collect()  # [AUTO-FIX] serverless-safe (sem .rdd)\n"
+                f"    )\n"
+                f"]"
+            )
+
+        new_content2 = lc_pattern.sub(replace_with_lc, new_content)
+        if new_content2 == new_content:
+            # Se não conseguiu fazer o lc_pattern, usa a versão simples
+            notebook_path.write_text(new_content, encoding="utf-8")
+            return f"Removido .rdd.flatMap em {len(matches)} local(is) — collect() mantido"
+
+        notebook_path.write_text(new_content2, encoding="utf-8")
+        return f"Substituído .rdd.flatMap por list comprehension em {len(matches)} local(is) — serverless-safe"

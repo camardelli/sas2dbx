@@ -233,7 +233,31 @@ class FixApplier:
 
         elif fm.action == "append":
             existing = target.read_text(encoding="utf-8") if target.exists() else ""
-            target.write_text(existing + "\n" + fm.content, encoding="utf-8")
+            combined = existing + "\n" + fm.content
+
+            # Validação extra para arquivos Python: rejeita append que:
+            # (a) produz SyntaxError — corrompe o módulo
+            # (b) cria segunda definição de função já existente — shadowing silencioso
+            if fm.path.endswith(".py"):
+                import ast as _ast, re as _re
+                try:
+                    _ast.parse(combined)
+                except SyntaxError as _syn:
+                    raise ValueError(
+                        f"action=append em '{fm.path}' produz SyntaxError: {_syn} — "
+                        "use action=modify com old_string para edições em arquivos Python"
+                    )
+                # Detecta def duplicado: se content define uma função que já existe no arquivo
+                _new_defs = set(_re.findall(r"^\s*def\s+(\w+)\s*\(", fm.content, _re.MULTILINE))
+                _existing_defs = set(_re.findall(r"^\s*def\s+(\w+)\s*\(", existing, _re.MULTILINE))
+                _dupes = _new_defs & _existing_defs
+                if _dupes:
+                    raise ValueError(
+                        f"action=append em '{fm.path}' criaria definição duplicada de: "
+                        f"{', '.join(sorted(_dupes))} — use action=modify para substituir a existente"
+                    )
+
+            target.write_text(combined, encoding="utf-8")
             return True
 
         elif fm.action == "modify":

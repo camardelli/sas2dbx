@@ -83,6 +83,11 @@ class RetestEngine:
             "OK" if improved else "FALHOU",
             execution_result.status,
         )
+        if not improved and execution_result.error:
+            logger.info(
+                "RetestEngine: erro após retest — %s",
+                str(execution_result.error)[:300],
+            )
 
         return RetestResult(
             deploy_result=deploy_result,

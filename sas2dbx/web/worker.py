@@ -49,6 +49,11 @@ class MigrationWorker:
         # C1/C2: EvolutionEngine singleton — construído uma vez, compartilhado entre heals
         # Evita reconectar LLMClient e re-carregar HealthMonitor a cada _try_evolve()
         self._evolution_engine = None  # lazy init na primeira chamada (api_key pode não estar disponível no boot)
+        # HealingKnowledgeBase singleton — compartilhado entre heals e evolution engine
+        # Persiste em catalog_dir/healing_kb.json para sobreviver entre sessões
+        from sas2dbx.validate.heal.knowledge_base import HealingKnowledgeBase
+        _catalog_dir = storage.work_dir / "catalog"
+        self._healing_kb = HealingKnowledgeBase(_catalog_dir / "healing_kb.json")
         # Cancelamento cooperativo: cada migration_id tem um Event que a thread verifica
         self._cancel_events: dict[str, threading.Event] = {}
 
@@ -195,6 +200,7 @@ class MigrationWorker:
                 config=config,
                 max_iterations=body.max_iterations,
                 healing_history=healing_history,
+                kb=self._healing_kb,
             )
             report = pipeline.heal(notebook_path, exec_result)
 
@@ -569,6 +575,7 @@ class MigrationWorker:
             health_monitor=health,
             unresolved_dir=self._storage.work_dir / "catalog" / "unresolved",
             catalog_dir=self._storage.work_dir / "catalog",
+            kb=self._healing_kb,
         )
         return self._evolution_engine
 

@@ -160,6 +160,7 @@ Erro Databricks:
 TENTATIVAS DE FIX QUE FALHARAM
 ═══════════════════════════════════════════════════════════════
 {healing_attempts_text}
+{kb_context}
 
 ═══════════════════════════════════════════════════════════════
 CÓDIGO SAS ORIGINAL
@@ -243,11 +244,18 @@ class EvolutionAnalyzer:
     Args:
         llm_client: LLMClient configurado (Anthropic ou Khon gateway).
         project_root: Raiz do projeto (para ler arquivos relevantes).
+        kb: HealingKnowledgeBase opcional — injeta histórico de falhas no prompt.
     """
 
-    def __init__(self, llm_client: object, project_root: Path | None = None) -> None:
+    def __init__(
+        self,
+        llm_client: object,
+        project_root: Path | None = None,
+        kb: object | None = None,
+    ) -> None:
         self._llm = llm_client
         self._project_root = project_root or Path.cwd()
+        self._kb = kb
 
     def analyze_sync(self, error: UnresolvedError) -> EvolutionProposal | None:
         """Analisa o erro e propõe fix no código-fonte (síncrono).
@@ -314,6 +322,20 @@ class EvolutionAnalyzer:
         # e não no conteúdo atual do arquivo — causando "old_string não encontrado".
         file_contents = self._read_relevant_files(error.error_category)
 
+        # Injeta histórico do KB se disponível — permite que o LLM evite fixes já falhos
+        kb_context = ""
+        if self._kb is not None:
+            try:
+                # Deriva a error_key da última tentativa de healing (se disponível)
+                error_key = "unknown"
+                if error.healing_attempts:
+                    # Usa o fix_applied da última tentativa como proxy para error_key
+                    last_att = error.healing_attempts[-1]
+                    error_key = last_att.fix_applied or error.job_id
+                kb_context = self._kb.get_context_for_llm(error.error_category, error_key)
+            except Exception:  # noqa: BLE001
+                pass  # KB é melhor esforço — nunca bloqueia o EvolutionEngine
+
         return _PROMPT_TEMPLATE.format(
             num_attempts=len(error.healing_attempts),
             job_id=error.job_id,
@@ -322,6 +344,7 @@ class EvolutionAnalyzer:
             error_category=error.error_category,
             databricks_error=error.databricks_error[:2000],
             healing_attempts_text=attempts_text,
+            kb_context=kb_context,
             sas_original=error.sas_original[:3000],
             pyspark_snippet=pyspark_snippet,
             file_contents=file_contents,
@@ -349,8 +372,15 @@ class EvolutionAnalyzer:
                 "sas2dbx/validate/heal/patterns.py",
                 "sas2dbx/validate/heal/fixer.py",
             ],
+            # "syntax" e "syntax_error" ambos mapeiam para fixer.py — erros de sintaxe
+            # no retest são frequentemente causados pela lógica de inserção do fixer.
+            "syntax": [
+                "sas2dbx/validate/heal/patterns.py",
+                "sas2dbx/validate/heal/fixer.py",
+            ],
             "syntax_error": [
                 "sas2dbx/validate/heal/patterns.py",
+                "sas2dbx/validate/heal/fixer.py",
             ],
             "analysis_exception": [
                 "sas2dbx/validate/heal/patterns.py",
@@ -365,6 +395,8 @@ class EvolutionAnalyzer:
         _FIXER_ANCHOR: dict[str, str] = {
             "missing_table": "_fix_missing_table",
             "unresolved_column_suggestion": "_fix_unresolved_column",
+            "syntax": "_fix_placeholder_add_column",
+            "syntax_error": "_fix_placeholder_add_column",
         }
 
         sections: list[str] = []
