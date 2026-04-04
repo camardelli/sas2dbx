@@ -161,12 +161,8 @@ class DatabricksDeployer:
         }
 
         if self._config.cluster_id:
+            # Cluster clássico fixo explicitamente configurado
             task["existing_cluster_id"] = self._config.cluster_id
-        else:
-            task["new_cluster"] = {
-                "node_type_id": self._config.node_type_id,
-                "spark_version": self._config.spark_version,
-                "num_workers": 1,
-            }
+        # else: sem campo de compute = Databricks usa serverless automaticamente
 
         return {"name": job_name, "tasks": [task]}

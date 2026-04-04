@@ -110,21 +110,29 @@ class TestDatabricksDeployer:
         result = deployer.deploy(nb, "nb")
         assert result.workspace_path == "/sas2dbx_migrations/nb"
 
-    def test_build_job_settings_uses_config_cluster(self) -> None:
-        cfg = DatabricksConfig(
-            host="h",
-            token="t",
-            node_type_id="c5.xlarge",
-            spark_version="14.0.x-scala2.12",
-        )
+    def test_build_job_settings_serverless_by_default(self) -> None:
+        """Sem cluster_id: serverless — task não deve ter new_cluster nem existing_cluster_id."""
+        cfg = DatabricksConfig(host="h", token="t")
         deployer = DatabricksDeployer.__new__(DatabricksDeployer)
         deployer._config = cfg
         deployer._client = MagicMock()
 
         settings = deployer._build_job_settings("/p/nb", "nb")
-        cluster = settings["tasks"][0]["new_cluster"]
-        assert cluster["node_type_id"] == "c5.xlarge"
-        assert cluster["spark_version"] == "14.0.x-scala2.12"
+        task = settings["tasks"][0]
+        assert "new_cluster" not in task
+        assert "existing_cluster_id" not in task
+
+    def test_build_job_settings_uses_existing_cluster_when_set(self) -> None:
+        """Com cluster_id: usa existing_cluster_id (cluster clássico fixo)."""
+        cfg = DatabricksConfig(host="h", token="t", cluster_id="abc-123")
+        deployer = DatabricksDeployer.__new__(DatabricksDeployer)
+        deployer._config = cfg
+        deployer._client = MagicMock()
+
+        settings = deployer._build_job_settings("/p/nb", "nb")
+        task = settings["tasks"][0]
+        assert task["existing_cluster_id"] == "abc-123"
+        assert "new_cluster" not in task
 
     def test_import_error_without_sdk(self) -> None:
         """_build_client lança ImportError se databricks-sdk não instalado."""
