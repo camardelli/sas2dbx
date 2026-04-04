@@ -99,6 +99,16 @@ class TestResolveFstringTables:
         result = self._checker()._resolve_fstring_tables(content)
         assert result == []
 
+    def test_skips_double_qualified_name(self) -> None:
+        # Variável já contém catalog.schema — f-string adiciona outro prefixo
+        # Resultado seria "cat.sch.cat.sch.tabela" (5 segmentos) — deve ser ignorado
+        content = (
+            'TABLE = "cat.sch.tabela"\n'
+            'df = spark.read.table(f"cat.sch.{TABLE}")\n'
+        )
+        result = self._checker()._resolve_fstring_tables(content)
+        assert result == []
+
 
 # ---------------------------------------------------------------------------
 # check() — integração com mock do WorkspaceClient

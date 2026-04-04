@@ -245,7 +245,8 @@ class PreflightChecker:
                     template,
                 )
                 # Só adiciona se todos os placeholders foram resolvidos (sem { restante)
-                if "{" not in result:
+                # e o nome tem exatamente 3 segmentos (catalog.schema.table)
+                if "{" not in result and result.count(".") == 2:
                     resolved.append(result)
             except Exception:  # noqa: BLE001
                 pass
