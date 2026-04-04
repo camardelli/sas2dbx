@@ -183,8 +183,12 @@ class MigrationStorage:
         if state_path.exists():
             try:
                 state = json.loads(state_path.read_text(encoding="utf-8"))
+                migration_active = meta.get("status") in ("processing", "pending")
                 for job_id, job_data in state.get("jobs", {}).items():
                     job_status = job_data.get("status", "pending")
+                    # Jobs travados em "in_progress" por cancel/crash → normaliza para "failed"
+                    if job_status == "in_progress" and not migration_active:
+                        job_status = "failed"
                     confidence = job_data.get("confidence")
                     jobs.append({
                         "job_id": job_id,
