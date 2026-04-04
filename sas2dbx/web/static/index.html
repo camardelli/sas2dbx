@@ -1127,8 +1127,8 @@ async function pollValidation(id) {
       document.getElementById("awaiting-tables-list").innerHTML = listHtml;
       document.getElementById("detail-awaiting-tables-card").style.display = "block";
       document.getElementById("detail-validation-card").style.display = "none";
-      document.getElementById("btn-validate").disabled = false;
-      document.getElementById("btn-validate").textContent = "Deploy & Executar no Databricks";
+      document.getElementById("btn-validate").disabled = true;
+      document.getElementById("btn-validate").textContent = "Aguardando tabelas…";
       renderPipelineStep("deploy", "pending", "Deploy", "Aguardando criação das tabelas de origem…");
       renderPipelineStep("execution", "pending", "Execução", "—");
       renderPipelineStep("result",    "pending", "Resultado", "—");

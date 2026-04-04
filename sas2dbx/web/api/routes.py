@@ -405,6 +405,17 @@ async def start_validation(
     if meta["status"] != "done":
         raise HTTPException(status_code=409, detail="Migração ainda não concluída.")
 
+    # Bloqueia nova validação enquanto tabelas de origem estiverem pendentes —
+    # o usuário deve usar POST /validation/resume (que re-executa o preflight)
+    if meta.get("validation", {}).get("status") == "awaiting_tables":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Deploy bloqueado: tabelas de origem ausentes no Databricks. "
+                "Crie as tabelas e use 'Verificar e Retomar Deploy'."
+            ),
+        )
+
     # Limpa resultado anterior (retry) para que o polling não leia estado antigo
     meta["validation"] = {"status": "running"}
     storage.save_meta(str(migration_id), meta)
