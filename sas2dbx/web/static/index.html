@@ -656,10 +656,13 @@ function encodeHTML(s) {
 }
 
 function badge(status) {
+  // "in_progress" é o status interno do state.json — normaliza para "processing"
+  const normalized = status === "in_progress" ? "processing" : status;
   const allowed = ["pending", "processing", "done", "failed", "cancelled"];
-  const safe = allowed.includes(status) ? status : "pending";
+  const safe = allowed.includes(normalized) ? normalized : "pending";
+  const label = status === "in_progress" ? "running" : safe;
   const cls = { pending: "badge-pending", processing: "badge-processing", done: "badge-done", failed: "badge-failed", cancelled: "badge-cancelled" }[safe];
-  return `<span class="badge ${cls}">${safe}</span>`;
+  return `<span class="badge ${cls}">${label}</span>`;
 }
 
 function fmtDate(iso) {
@@ -851,11 +854,14 @@ function renderStatus(data) {
   const total = p.total || 0;
   const done = p.done || 0;
   const failed = p.failed || 0;
+  const inProgress = p.in_progress || 0;
   const pct = total > 0 ? Math.round(((done + failed) / total) * 100) : (data.status === "done" ? 100 : 0);
   document.getElementById("progress-fill").style.width = pct + "%";
   let progressLabel;
   if (total > 0) {
-    const jobsLabel = `${done + failed} / ${total} jobs · ${done} concluídos · ${failed} com falha`;
+    let parts = [`${done + failed} / ${total} jobs`, `${done} concluídos`, `${failed} com falha`];
+    if (inProgress > 0) parts.push(`${inProgress} em execução`);
+    const jobsLabel = parts.join(" · ");
     if (pct === 100 && data.status === "processing") {
       progressLabel = jobsLabel + " · Gerando documentação e arquitetura…";
     } else {
