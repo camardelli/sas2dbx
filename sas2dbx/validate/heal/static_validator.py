@@ -102,6 +102,62 @@ _RE_SAS_DATETIME_LIT = re.compile(
 # Padrão MONOTONIC() em SQL — função SAS não suportada pelo Spark
 _RE_MONOTONIC = re.compile(r"\bMONOTONIC\(\)", re.IGNORECASE)
 
+# ---------------------------------------------------------------------------
+# Column reconciliation — constantes de módulo
+# ---------------------------------------------------------------------------
+
+# Prefixos de nomenclatura SAS → equivalentes Databricks/PySpark.
+# Formato:
+#   "sas_prefix_": "expanded_prefix_"  — substitui prefixo, mantém sufixo
+#   "sas_prefix_": "name"              — substitui pelo nome inteiro (sem sufixo)
+# Extensível: adicionar entradas conforme convenções do cliente.
+SAS_COLUMN_ALIASES: dict[str, str] = {
+    "vl_":  "valor_",       # vl_venda    → valor_venda,  vl_total → valor_total
+    "nm_":  "nome",         # nm_cliente  → nome  (tenta tb nome_<sufixo>)
+    "cd_":  "id_",          # cd_cliente  → id_cliente
+    "nr_":  "num_",         # nr_pedido   → num_pedido
+    "ds_":  "descricao_",   # ds_plano    → descricao_plano
+    "fl_":  "flag_",        # fl_ativo    → flag_ativo
+    "qt_":  "qtd_",         # qt_vendas   → qtd_vendas
+    "tp_":  "tipo_",        # tp_transacao → tipo_transacao
+    "sg_":  "sigla_",       # sg_uf       → sigla_uf
+    "pc_":  "pct_",         # pc_desconto → pct_desconto
+    "in_":  "ind_",         # in_ativo    → ind_ativo
+    "sk_":  "id_",          # sk_cliente  → id_cliente  (surrogate keys)
+}
+
+# Coluna referenciada via DataFrame API: F.col("name") ou col("name")
+_RE_FCOL_REF = re.compile(r'\bF\.col\(\s*["\']([A-Za-z_]\w*)["\']')
+_RE_COL_REF  = re.compile(r'(?<![.\w])col\(\s*["\']([A-Za-z_]\w*)["\']')
+
+# Colunas de OUTPUT: criadas pelo notebook, não são inputs a reconciliar
+_RE_WITHCOL_OUT  = re.compile(r'\.withColumn\(\s*["\']([A-Za-z_]\w*)["\']')
+_RE_ALIAS_OUT    = re.compile(r'\.alias\(\s*["\']([A-Za-z_]\w*)["\']')
+_RE_RENAME_NEW   = re.compile(
+    r'\.withColumnRenamed\(\s*["\'][^"\']+["\']\s*,\s*["\']([A-Za-z_]\w*)["\']'
+)
+
+# Literais que não são nomes de coluna (F.lit("valor"))
+_RE_LIT_STR = re.compile(r'\bF\.lit\(\s*["\']([^"\']*)["\']')
+
+# Tabelas lidas no notebook: spark.read.table / spark.table
+_RE_NB_READ_TABLE = re.compile(
+    r'spark\.(?:read\.table|table)\(\s*["\']([a-zA-Z0-9_.]+)["\']\s*\)'
+)
+# Tabelas em SQL inline: FROM / JOIN fqn
+_RE_NB_SQL_TABLE = re.compile(
+    r'(?:FROM|JOIN)\s+([a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+){1,2})',
+    re.IGNORECASE,
+)
+
+# Colunas em SQL strings (spark.sql): SELECT col1, col2 FROM ...
+# Captura identificadores sem ponto antes de FROM/WHERE/GROUP/ORDER/HAVING/LIMIT
+_RE_SQL_SELECT_COL = re.compile(
+    r'SELECT\s+(.*?)\s+FROM',
+    re.IGNORECASE | re.DOTALL,
+)
+_RE_SQL_COL_TOKEN = re.compile(r'\b([A-Za-z_]\w*)(?:\s+AS\s+\w+)?(?=\s*(?:,|\s+FROM))', re.IGNORECASE)
+
 
 class StaticNotebookValidator:
     """Valida e corrige notebooks .py antes do deploy no Databricks.
@@ -220,10 +276,32 @@ class StaticNotebookValidator:
                     exc,
                 )
 
+        # Reconciliação de colunas com schema real — rodada após todos os outros fixers.
+        # Auto-carrega schemas.yaml da mesma pasta do notebook (gerado pelo preflight).
+        schemas = self._load_schemas_for_notebook(notebook_path)
+        if schemas:
+            content, fix = self._reconcile_columns_with_schema(content, schemas)
+            if fix:
+                report.fixes.append(fix)
+
         if content != original:
             notebook_path.write_text(content, encoding="utf-8")
 
         return report
+
+    def _load_schemas_for_notebook(
+        self, notebook_path: Path
+    ) -> dict[str, list[str]]:
+        """Carrega schemas.yaml co-localizado com os notebooks (gerado pelo preflight)."""
+        schemas_path = notebook_path.parent / "schemas.yaml"
+        if not schemas_path.exists():
+            return {}
+        try:
+            from sas2dbx.transpile.llm.context import load_table_schemas
+            return load_table_schemas(schemas_path)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("StaticValidator: não foi possível carregar schemas.yaml: %s", exc)
+            return {}
 
     # ------------------------------------------------------------------
     # Fixers internos
@@ -294,6 +372,276 @@ class StaticNotebookValidator:
         if removed:
             return "\n".join(clean), f"Removidos {removed} bloco(s) AUTO-FIX"
         return content, None
+
+    # ------------------------------------------------------------------
+    # Column reconciliation
+    # ------------------------------------------------------------------
+
+    def _extract_referenced_tables(self, content: str) -> list[str]:
+        """Extrai FQNs de tabelas lidas no notebook (não escritas)."""
+        # Tabelas em saveAsTable / CREATE TABLE — são writes, excluir
+        write_tables: set[str] = set()
+        for m in re.finditer(r'saveAsTable\(\s*["\']([^"\']+)["\']\s*\)', content):
+            t = m.group(1).lower()
+            write_tables.add(t)
+            write_tables.add(t.split(".")[-1])
+        for m in re.finditer(
+            r'CREATE\s+(?:OR\s+REPLACE\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?'
+            r'([`"\']?[\w]+(?:\.[\w]+){0,2}[`"\']?)',
+            content, re.IGNORECASE,
+        ):
+            t = m.group(1).strip("`\"'").lower()
+            write_tables.add(t)
+            write_tables.add(t.split(".")[-1])
+
+        read_tables: set[str] = set()
+        for m in _RE_NB_READ_TABLE.finditer(content):
+            t = m.group(1).lower()
+            if t not in write_tables and t.split(".")[-1] not in write_tables:
+                read_tables.add(t)
+        for m in _RE_NB_SQL_TABLE.finditer(content):
+            t = m.group(1).lower()
+            if t not in write_tables and t.split(".")[-1] not in write_tables and "." in t:
+                read_tables.add(t)
+        return list(read_tables)
+
+    def _expand_sas_prefix(self, col: str, real_columns: set[str]) -> str | None:
+        """Tenta expandir prefixo SAS e encontrar match exato no schema.
+
+        Ex: vl_venda → valor_venda (não encontrado) → None
+            nm_cliente → nome (encontrado!) → 'nome'
+            tp_transacao → tipo_transacao (encontrado!) → 'tipo_transacao'
+        """
+        col_lower = col.lower()
+        for sas_prefix, expanded in SAS_COLUMN_ALIASES.items():
+            if not col_lower.startswith(sas_prefix):
+                continue
+            suffix = col_lower[len(sas_prefix):]
+            # Caso "expanded_": substituição de prefixo, mantém sufixo
+            if expanded.endswith("_"):
+                candidate = expanded + suffix
+                if candidate in real_columns:
+                    return candidate
+            else:
+                # Caso "name" sem trailing _: tenta nome direto e nome_sufixo
+                if expanded in real_columns:
+                    return expanded
+                if suffix and (expanded + "_" + suffix) in real_columns:
+                    return expanded + "_" + suffix
+        return None
+
+    def _find_best_column_match(
+        self, col: str, real_columns: set[str]
+    ) -> tuple[str, str] | None:
+        """Retorna (replacement, method) ou None.
+
+        Precedência:
+        1. Expansão de prefixo SAS (determinística — alta confiança)
+        2. SequenceMatcher >= 0.85 (conservador — só typos óbvios)
+        Avisa mas não substitui para 0.65–0.85.
+        """
+        from difflib import SequenceMatcher
+
+        # 1. Alias de prefixo SAS
+        expanded = self._expand_sas_prefix(col, real_columns)
+        if expanded:
+            return expanded, "alias SAS"
+
+        # 2. Similaridade de string (threshold conservador)
+        col_lower = col.lower()
+        best_score = 0.0
+        best_match = ""
+        for real_col in real_columns:
+            score = SequenceMatcher(None, col_lower, real_col.lower()).ratio()
+            if score > best_score:
+                best_score = score
+                best_match = real_col
+
+        if best_score >= 0.85:
+            return best_match, f"similaridade={best_score:.2f}"
+        if best_score >= 0.65:
+            logger.warning(
+                "StaticValidator: coluna suspeita '%s' (melhor match: '%s' score=%.2f)"
+                " — não substituída automaticamente, revisão manual recomendada",
+                col, best_match, best_score,
+            )
+        return None
+
+    def _reconcile_columns_with_schema(
+        self, content: str, schemas: dict[str, list[str]]
+    ) -> tuple[str, str | None]:
+        """Reconcilia nomes de coluna inventados pelo LLM contra o schema real.
+
+        Roda após todos os outros fixers, antes do deploy.
+        Substitui apenas colunas referenciadas em F.col() / col() e SELECT SQL
+        que não existem no schema — nunca toca colunas derivadas (withColumn outputs).
+
+        Args:
+            content: Conteúdo do notebook .py.
+            schemas: Dict FQN → list[col_name] (de schemas.yaml).
+
+        Returns:
+            (new_content, fix_description) onde fix_description é None se sem alterações.
+        """
+        if not schemas:
+            return content, None
+
+        # 1. Tabelas referenciadas no notebook
+        referenced_tables = self._extract_referenced_tables(content)
+        if not referenced_tables:
+            return content, None
+
+        # 2. Pool de colunas reais (de todas as tabelas de origem)
+        real_columns: set[str] = set()
+        col_to_table: dict[str, str] = {}
+        for table_fqn in referenced_tables:
+            short = table_fqn.split(".")[-1].lower()
+            cols = schemas.get(table_fqn, schemas.get(short, []))
+            for col in cols:
+                real_columns.add(col.lower())
+                col_to_table[col.lower()] = table_fqn.split(".")[-1]
+
+        if not real_columns:
+            return content, None
+
+        # 3. Colunas de output (não reconciliar — são outputs criados pelo notebook)
+        output_columns: set[str] = set()
+        for m in _RE_WITHCOL_OUT.finditer(content):
+            output_columns.add(m.group(1).lower())
+        for m in _RE_ALIAS_OUT.finditer(content):
+            output_columns.add(m.group(1).lower())
+        for m in _RE_RENAME_NEW.finditer(content):
+            output_columns.add(m.group(1).lower())
+        # Literais F.lit("string") não são nomes de coluna
+        lit_values: set[str] = {m.group(1).lower() for m in _RE_LIT_STR.finditer(content)}
+
+        # 4. Colunas de input referenciadas via DataFrame API e SQL strings
+        input_refs: set[str] = set()
+        for m in _RE_FCOL_REF.finditer(content):
+            input_refs.add(m.group(1))
+        for m in _RE_COL_REF.finditer(content):
+            input_refs.add(m.group(1))
+        # Extrai colunas de SELECT dentro de spark.sql("""...""")
+        _SQL_KEYWORDS = frozenset({
+            "select", "from", "where", "join", "on", "and", "or", "not",
+            "group", "by", "order", "having", "limit", "as", "distinct",
+            "inner", "left", "right", "outer", "cross", "case", "when",
+            "then", "else", "end", "null", "true", "false", "in", "is",
+            "between", "like", "cast", "coalesce", "count", "sum", "avg",
+            "min", "max", "over", "partition", "rows", "unbounded",
+            "preceding", "following", "current", "row",
+        })
+        for sql_m in re.finditer(r'spark\.sql\(\s*f?"""(.*?)"""\s*\)', content, re.DOTALL):
+            sql_body = sql_m.group(1)
+            # Identifica colunas não-qualificadas (sem ponto antes): palavras que não
+            # são keywords SQL, funções conhecidas, ou nomes de tabela com ponto
+            for tok_m in re.finditer(r'(?<![.\w])([A-Za-z_]\w*)(?!\s*\()', sql_body):
+                tok = tok_m.group(1)
+                if tok.lower() not in _SQL_KEYWORDS and len(tok) >= 3:
+                    input_refs.add(tok)
+
+        # 5. Determinar substituições
+        replacements: dict[str, str] = {}  # original_case → replacement
+        for col in input_refs:
+            col_lower = col.lower()
+            if (col_lower in real_columns          # já existe
+                    or col_lower in output_columns  # é output derivado
+                    or col_lower in lit_values       # é literal string
+                    or col.startswith("_")           # coluna interna Spark
+                    or len(col) < 3):                # muito curto / ambíguo
+                continue
+            match = self._find_best_column_match(col, real_columns)
+            if match:
+                replacements[col] = match[0]  # (replacement, method)
+                # Guarda method para o log — precisamos recalcular
+                # (reutiliza a tupla completa via closure abaixo)
+
+        # Recalcula com método para log estruturado
+        replacements_full: dict[str, tuple[str, str]] = {}
+        for col in input_refs:
+            col_lower = col.lower()
+            if (col_lower in real_columns
+                    or col_lower in output_columns
+                    or col_lower in lit_values
+                    or col.startswith("_")
+                    or len(col) < 3):
+                continue
+            match = self._find_best_column_match(col, real_columns)
+            if match:
+                replacements_full[col] = match  # (replacement, method)
+
+        if not replacements_full:
+            return content, None
+
+        # 6. Aplicar substituições em F.col() e col() patterns
+        new_content = content
+        applied: list[str] = []
+        for original, (replacement, method) in sorted(replacements_full.items()):
+            original_re = re.escape(original)
+            # F.col("original") → F.col("replacement")
+            pattern_f = re.compile(r'(\bF\.col\(\s*["\'])' + original_re + r'(["\'])')
+            new_content, n1 = pattern_f.subn(
+                lambda m, r=replacement: m.group(1) + r + m.group(2),
+                new_content,
+            )
+            # col("original") → col("replacement")
+            pattern_c = re.compile(r'((?<![.\w])col\(\s*["\'])' + original_re + r'(["\'])')
+            new_content, n2 = pattern_c.subn(
+                lambda m, r=replacement: m.group(1) + r + m.group(2),
+                new_content,
+            )
+            # SQL strings: SELECT/WHERE unqualified identifiers
+            new_content, n3 = self._reconcile_in_sql_strings(
+                new_content, original, replacement, real_columns
+            )
+            if n1 + n2 + n3 > 0:
+                table_hint = col_to_table.get(replacement.lower(), "?")
+                applied.append(
+                    f"'{original}' → '{replacement}' ({method}, tabela: {table_hint})"
+                )
+
+        if not applied:
+            return content, None
+
+        logger.info(
+            "StaticValidator: reconciliação de colunas — %d substituição(ões): %s",
+            len(applied), "; ".join(applied),
+        )
+        return new_content, f"reconciliação de colunas ({len(applied)}): {'; '.join(applied)}"
+
+    def _reconcile_in_sql_strings(
+        self,
+        content: str,
+        original: str,
+        replacement: str,
+        real_columns: set[str],
+    ) -> tuple[str, int]:
+        """Substitui `original` por `replacement` dentro de spark.sql() strings.
+
+        Só substitui identificadores não-qualificados (sem ponto antes) para evitar
+        falsos positivos em nomes de tabelas, aliases SQL, e keywords.
+        """
+        # Encontra blocos spark.sql("""...""") e spark.sql("...")
+        _RE_SQL_BLOCK = re.compile(
+            r'(spark\.sql\(\s*(?:f?""")(.*?)(?:""")\s*\))',
+            re.DOTALL,
+        )
+        count = 0
+        original_re = re.escape(original)
+        # Substitui apenas se a palavra não é precedida por ponto (qualificação de tabela)
+        col_in_sql = re.compile(r'(?<![.\w])' + original_re + r'\b')
+
+        def _replace_sql_block(m: re.Match) -> str:
+            nonlocal count
+            prefix = m.group(1)[: m.start(2) - m.start(1)]   # "spark.sql(f\"\"\""
+            sql_body = m.group(2)
+            new_body, n = col_in_sql.subn(replacement, sql_body)
+            count += n
+            suffix = m.group(1)[m.end(2) - m.start(1):]       # "\"\"\"\)"
+            return prefix + new_body + suffix
+
+        new_content = _RE_SQL_BLOCK.sub(_replace_sql_block, content)
+        return new_content, count
 
     def _fix_spark_conf_get(self, content: str) -> tuple[str, str | None]:
         """Substitui spark.conf.get() por valor padrão (evita CONFIG_NOT_AVAILABLE)."""
