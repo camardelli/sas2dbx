@@ -902,6 +902,13 @@ function showDetail(id) {
   document.getElementById("detail-status").innerHTML = badge("pending");
   document.getElementById("progress-label").textContent = "Aguardando...";
   document.getElementById("progress-fill").style.width = "0%";
+  // Limpa card de tabelas ausentes para não vazar estado de migração anterior
+  document.getElementById("detail-awaiting-tables-card").style.display = "none";
+  document.getElementById("awaiting-tables-list").innerHTML = "";
+  document.getElementById("detail-validation-card").style.display = "none";
+  document.getElementById("validation-error").innerHTML = "";
+  document.getElementById("btn-validate").disabled = false;
+  document.getElementById("btn-validate").textContent = "Deploy & Executar no Databricks";
   showLogBtn(true);
   startPolling(id);
 }
