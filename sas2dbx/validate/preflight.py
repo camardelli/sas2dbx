@@ -477,10 +477,17 @@ class PreflightChecker:
         try:
             import yaml  # type: ignore[import]
 
-            # Carrega existente (se houver) para merge incremental
+            # Se schemas.yaml já existe (gerado pelo SourceInventory antes da transpilação),
+            # o preflight NÃO sobrescreve — inventory é a fonte de verdade para SOURCE tables.
+            # O preflight só adiciona tabelas novas descobertas durante validação.
             existing: dict = {}
             if schemas_path.exists():
                 existing = yaml.safe_load(schemas_path.read_text(encoding="utf-8")) or {}
+                if existing:
+                    logger.debug(
+                        "PreflightChecker: schemas.yaml já existe (%d tabela(s)) — merge incremental, sem sobrescrita",
+                        len(existing),
+                    )
 
             # Merge: novas tabelas adicionadas; existentes preservadas (curadoria manual tem precedência)
             for table, cols in schemas.items():

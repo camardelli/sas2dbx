@@ -26,6 +26,7 @@ _PIPELINE_STEPS_TEMPLATE = [
     {"id": "extract",      "label": "Extraindo arquivos ZIP",          "status": "pending", "detail": ""},
     {"id": "scan",         "label": "Escaneando jobs SAS",             "status": "pending", "detail": ""},
     {"id": "analyze",      "label": "Analisando dependências",         "status": "pending", "detail": ""},
+    {"id": "inventory",   "label": "Verificando tabelas SOURCE",       "status": "pending", "detail": ""},
     {"id": "transpile",    "label": "Transpilando para PySpark",       "status": "pending", "detail": ""},
     {"id": "document",     "label": "Gerando documentação por job",    "status": "pending", "detail": ""},
     {"id": "architecture", "label": "Gerando ARCHITECTURE.md",         "status": "pending", "detail": ""},

@@ -12,16 +12,12 @@ import logging
 from dataclasses import dataclass, field
 
 from sas2dbx.inventory import InventoryEntry
+from sas2dbx.validate.config import DatabricksConfig
 
 logger = logging.getLogger(__name__)
 
-
-@dataclass
-class DatabricksConfig:
-    """Configuração mínima para conexão com Databricks."""
-
-    host: str
-    token: str
+# Re-exporta para conveniência — evita importar de dois lugares
+__all__ = ["DatabricksConfig", "DatabricksChecker", "CheckResult", "check_offline"]
 
 
 @dataclass

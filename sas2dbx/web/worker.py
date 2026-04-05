@@ -811,6 +811,85 @@ class MigrationWorker:
         meta["execution_order"] = execution_order
         self._storage.save_meta(migration_id, meta)
 
+        # 3b — Source Inventory (ANTES da transpilação)
+        # Verifica tabelas SOURCE no Databricks e gera schemas.yaml tipado.
+        # schemas.yaml gerado aqui é lido pelo TranspilationEngine na primeira call LLM,
+        # eliminando o problema de timing que causava invenção de colunas (job_107).
+        inventory_mode = meta.get("config", {}).get("inventory_mode", "STRICT")
+        # Tenta obter credenciais do environment (DATABRICKS_HOST + DATABRICKS_TOKEN)
+        try:
+            from sas2dbx.validate.config import DatabricksConfig as _DBC
+            _dbx_config = _DBC.from_env()
+        except (ValueError, ImportError):
+            _dbx_config = None
+        if _dbx_config and _dbx_config.is_complete():
+            try:
+                from sas2dbx.inventory.extractor import TableExtractor, classify_roles, map_libnames
+                from sas2dbx.inventory.checker import DatabricksChecker
+                from sas2dbx.inventory.gate import InventoryGate
+                from sas2dbx.inventory.reporter import InventoryReporter
+                from sas2dbx.transpile.llm.context import load_libnames as _load_libnames
+
+                step("inventory", "running")
+                all_entries: list = []
+                extractor = TableExtractor()
+                for sas_file in sas_files:
+                    from sas2dbx.ingest.reader import read_sas_file, split_blocks as _split_blocks
+                    try:
+                        code, _ = read_sas_file(sas_file.path)
+                        blocks = _split_blocks(code, source_file=sas_file.path)
+                        all_entries.extend(extractor.extract(blocks, source_file=sas_file.path))
+                    except Exception as _e:
+                        logger.warning("Inventory: erro ao extrair tabelas de %s — %s", sas_file.path.name, _e)
+
+                # Resolve LIBNAMEs → FQN
+                _libnames_path = input_dir / "libnames.yaml"
+                _libnames_map = _load_libnames(_libnames_path) if _libnames_path.exists() else {}
+                map_libnames(all_entries, _libnames_map)
+                classify_roles(all_entries)
+
+                # Verifica no Databricks via UC REST API
+                checker = DatabricksChecker(_dbx_config)
+                check_result = checker.check_all(all_entries)
+
+                # Gate
+                gate_result = InventoryGate().evaluate(check_result, mode=inventory_mode)
+
+                # Reporter
+                reporter = InventoryReporter()
+                inv_report = reporter.build_report(all_entries, check_result, gate_result)
+                reporter.save_report(inv_report, output_dir)
+                reporter.print_summary(inv_report)
+
+                # Salva schemas.yaml ANTES da transpilação
+                reporter.save_schemas(inv_report, output_dir)
+
+                step("inventory", "done", f"gate={gate_result.decision} sources={check_result.total} missing={gate_result.missing_count}")
+                meta = self._storage.get_meta(migration_id)
+                meta["inventory"] = {
+                    "gate": gate_result.decision,
+                    "missing_count": gate_result.missing_count,
+                    "schemas_captured": len(inv_report.schemas),
+                }
+                self._storage.save_meta(migration_id, meta)
+
+                if gate_result.decision == "BLOCK":
+                    step("transpile", "skipped", f"Inventory BLOCK: {gate_result.missing_count} tabela(s) SOURCE ausente(s)")
+                    logger.error(
+                        "MigrationWorker [%s]: inventory BLOCK — transpilação cancelada. %s",
+                        migration_id, gate_result.message,
+                    )
+                    return
+            except Exception as _inv_exc:
+                logger.warning(
+                    "MigrationWorker [%s]: inventory falhou com exceção — prosseguindo sem verificação: %s",
+                    migration_id, _inv_exc,
+                )
+                step("inventory", "skipped", f"erro: {_inv_exc}")
+        else:
+            step("inventory", "skipped", "sem credenciais Databricks — modo offline")
+            logger.info("MigrationWorker [%s]: inventory sem credenciais — schemas.yaml não pré-gerado", migration_id)
+
         # 4 — Transpilação (com LLM para Tier 2 se configurado)
         step("transpile", "running", f"0 / {len(sas_files)} jobs")
         llm_client = LLMClient(self._llm_config)
