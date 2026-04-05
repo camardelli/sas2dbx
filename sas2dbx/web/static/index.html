@@ -1454,8 +1454,11 @@ async function pollHealing(id, healingId) {
       renderPipelineStep("result", "healed", "Auto-Healing",
         `Corrigido em ${data.iterations} iteração(ões) · estratégia: ${encodeHTML(data.strategy)}`,
         `<div class="step-sub" style="color:var(--green)">${encodeHTML(data.description)}</div>`);
-      document.getElementById("btn-validate").textContent = "✓ Corrigido";
-      document.getElementById("btn-validate").disabled = false;
+      // Re-dispara validação automaticamente após heal bem-sucedido
+      // (re-deploy do notebook corrigido + execução dos dependentes desbloqueados)
+      renderPipelineStep("deploy", "running", "Deploy", "Re-deployando notebook corrigido…");
+      renderPipelineStep("execution", "pending", "Execução", "Aguardando re-deploy…");
+      setTimeout(() => startValidation(), 1500);
     } else {
       const err = data.error || data.description || "Não foi possível corrigir automaticamente";
       let evolHtml = "";
