@@ -795,6 +795,11 @@ function showHome() {
   showLogBtn(false);
   // Fecha painel de log ao voltar para home
   if (_log.open) toggleLogPanel();
+  // Limpa seleção de arquivo anterior
+  setFile(null);
+  fileInput.value = "";
+  uploadBtn.textContent = "Iniciar Migração";
+  uploadError.textContent = "";
   loadHistory();
 }
 
