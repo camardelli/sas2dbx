@@ -153,8 +153,8 @@ class PreflightChecker:
 
         # Verifica existência via Databricks API
         report = PreflightReport(checked_tables=len(table_to_notebooks))
-        # Schemas coletados via DESCRIBE TABLE (tabelas que existem) → salvo em schemas.yaml
-        discovered_schemas: dict[str, list[str]] = {}
+        # Schemas coletados via UC REST API (tabelas que existem) → salvo em schemas.yaml
+        discovered_schemas: dict[str, list[dict]] = {}
         try:
             from databricks.sdk import WorkspaceClient
             client = WorkspaceClient(
@@ -169,7 +169,11 @@ class PreflightChecker:
                     report.existing_tables.append(table_name)
                     # Coleta schema da tabela existente para injetar no prompt de transpilação
                     cols = [
-                        col.name for col in (getattr(table_info, "columns", None) or [])
+                        {
+                            "name": col.name,
+                            "type": str(getattr(col, "type_text", None) or "STRING"),
+                        }
+                        for col in (getattr(table_info, "columns", None) or [])
                         if getattr(col, "name", None)
                     ]
                     if cols:
@@ -455,7 +459,7 @@ class PreflightChecker:
         """Verifica se a tabela existe no catálogo Databricks."""
         return self._get_table_info(client, table_name) is not None
 
-    def _save_schemas(self, output_dir: Path, schemas: dict[str, list[str]]) -> None:
+    def _save_schemas(self, output_dir: Path, schemas: dict[str, list[dict]]) -> None:
         """Persiste schemas descobertos em output_dir/schemas.yaml.
 
         O TranspilationEngine lê este arquivo via _load_schema_raw() e injeta
@@ -467,7 +471,7 @@ class PreflightChecker:
 
         Args:
             output_dir: Diretório de saída dos notebooks da migração.
-            schemas: Dict table_fqn → list[column_name] coletado do Databricks.
+            schemas: Dict table_fqn → list[{"name": str, "type": str}] coletado do Databricks.
         """
         schemas_path = output_dir / "schemas.yaml"
         try:

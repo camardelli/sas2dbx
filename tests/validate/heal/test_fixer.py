@@ -233,3 +233,121 @@ class TestFixOutputColumnExists:
         result = fixer.apply_fix(nb, self._diag_dup("inexistente_idx"))
         # Handler roda mas não encontra nada — description indica ausência de fix
         assert "não encontradas" in result.description.lower() or result.patched is True
+
+
+# ---------------------------------------------------------------------------
+# _fix_placeholder_add_column — D3 bug fixes
+# ---------------------------------------------------------------------------
+
+
+def _write_schemas(tmp_path: Path, schemas: dict[str, list[str] | list[dict]]) -> None:
+    """Grava schemas.yaml no mesmo diretório do notebook.
+
+    Aceita list[str] (converte para list[dict]) ou list[dict] diretamente.
+    """
+    import yaml
+    schemas_path = tmp_path / "schemas.yaml"
+    normalized: dict = {}
+    for table, cols in schemas.items():
+        if cols and isinstance(cols[0], str):
+            normalized[table] = {"columns": [{"name": c, "type": "STRING"} for c in cols]}
+        else:
+            normalized[table] = {"columns": cols}
+    schemas_path.write_text(yaml.dump(normalized, allow_unicode=True), encoding="utf-8")
+
+
+class TestD3BugFixes:
+    """Bug 1 e Bug 2 do fixer D3."""
+
+    def _diag_d3(self, col: str) -> ErrorDiagnostic:
+        return ErrorDiagnostic(
+            error_raw=f"UNRESOLVED_COLUMN {col}",
+            deterministic_fix="fix_placeholder_add_column",
+            entities={"missing_column": col},
+        )
+
+    # ------------------------------------------------------------------
+    # Bug 2 — coluna derivada não existe no schemas.yaml → D3 ignorado
+    # ------------------------------------------------------------------
+
+    def test_derived_column_skipped_when_not_in_schemas(self, tmp_path: Path) -> None:
+        """Coluna criada por withColumnRenamed não está em schemas.yaml → D3 ignorado."""
+        content = (
+            'df = spark.read.table("telcostar.operacional.clientes_raw")\n'
+            'df = df.withColumnRenamed("_FREQ_", "clientes_cidade")\n'
+            'df = df.select(F.col("clientes_cidade"))\n'
+        )
+        nb = _notebook(tmp_path, content)
+        _write_schemas(tmp_path, {"telcostar.operacional.clientes_raw": ["id_cliente", "nome", "cidade"]})
+        fixer = NotebookFixer()
+        result = fixer._fix_placeholder_add_column(nb, "clientes_cidade")
+        assert "derivada" in result.lower()
+        # Notebook não deve ser modificado
+        assert nb.read_text(encoding="utf-8") == content
+
+    def test_real_missing_column_not_skipped(self, tmp_path: Path) -> None:
+        """Coluna que realmente existe no schema mas falta no notebook → D3 não ignora."""
+        content = (
+            'df = spark.read.table("telcostar.operacional.vendas_raw")\n'
+            'df = df.select(F.col("valor_bruto"))\n'
+        )
+        nb = _notebook(tmp_path, content)
+        _write_schemas(tmp_path, {"telcostar.operacional.vendas_raw": ["id_venda", "valor_bruto", "dt_venda"]})
+        fixer = NotebookFixer()
+        result = fixer._fix_placeholder_add_column(nb, "valor_bruto")
+        # "derivada" NÃO deve estar no resultado — D3 deve processar normalmente
+        assert "derivada" not in result.lower()
+
+    def test_no_schemas_file_proceeds_normally(self, tmp_path: Path) -> None:
+        """Sem schemas.yaml, Bug 2 não aplica e D3 continua fluxo normal."""
+        content = (
+            'df = spark.read.table("telcostar.operacional.vendas_raw")\n'
+            'df = df.select(F.col("valor_bruto"))\n'
+        )
+        nb = _notebook(tmp_path, content)
+        # Sem schemas.yaml no diretório
+        fixer = NotebookFixer()
+        result = fixer._fix_placeholder_add_column(nb, "valor_bruto")
+        assert "derivada" not in result.lower()
+
+    # ------------------------------------------------------------------
+    # Bug 1 — tabelas criadas por saveAsTable são excluídas de D3
+    # ------------------------------------------------------------------
+
+    def test_notebook_internal_table_excluded(self, tmp_path: Path) -> None:
+        """Tabela criada por saveAsTable no notebook não recebe ALTER TABLE nem withColumn."""
+        content = (
+            'df = spark.read.table("telcostar.operacional.vendas_raw")\n'
+            'df_agg = df.groupBy("canal_venda").count()\n'
+            'df_agg.write.mode("overwrite").saveAsTable("telcostar.operacional.geo_base")\n'
+            'df2 = spark.read.table("telcostar.operacional.geo_base")\n'
+        )
+        nb = _notebook(tmp_path, content)
+        # schemas.yaml tem apenas a tabela de origem, geo_base é output
+        _write_schemas(tmp_path, {
+            "telcostar.operacional.vendas_raw": ["id_venda", "canal_venda", "valor_bruto"],
+        })
+        fixer = NotebookFixer()
+        result = fixer._fix_placeholder_add_column(nb, "canal_venda")
+        # canal_venda existe em schemas.yaml → Bug 2 não aplica
+        # geo_base está em saveAsTable → Bug 1: excluído de D3
+        assert "geo_base" not in result or "exclu" in result.lower() or "derived" in result.lower()
+        # O notebook não deve ter ALTER TABLE para geo_base
+        modified = nb.read_text(encoding="utf-8")
+        assert 'ALTER TABLE telcostar.operacional.geo_base' not in modified
+        assert 'ALTER TABLE geo_base' not in modified
+
+    def test_source_table_not_excluded(self, tmp_path: Path) -> None:
+        """Tabela de origem (apenas lida, não salva) ainda pode ser candidata de D3."""
+        content = (
+            'df = spark.read.table("telcostar.operacional.vendas_raw")\n'
+            'df = df.select(F.col("valor_bruto"))\n'
+        )
+        nb = _notebook(tmp_path, content)
+        _write_schemas(tmp_path, {
+            "telcostar.operacional.vendas_raw": ["id_venda", "valor_bruto", "canal_venda"],
+        })
+        fixer = NotebookFixer()
+        result = fixer._fix_placeholder_add_column(nb, "valor_bruto")
+        # vendas_raw é apenas lida (não saveAsTable) → não deve ser excluída como interna
+        assert "excluída" not in result.lower() or "geo_base" not in result.lower()

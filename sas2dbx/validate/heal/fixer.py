@@ -772,6 +772,32 @@ class NotebookFixer:
         """
         content = notebook_path.read_text(encoding="utf-8")
 
+        # Bug 2 — coluna derivada: se missing_column não existe em nenhuma tabela
+        # de origem (schemas.yaml), é um output derivado do notebook (ex: withColumnRenamed,
+        # alias, withColumn) e D3 não deve tentar adicioná-la em nenhuma tabela.
+        _schemas_path = notebook_path.parent / "schemas.yaml"
+        if _schemas_path.exists():
+            try:
+                from sas2dbx.transpile.llm.context import load_table_schemas
+                _source_schemas = load_table_schemas(_schemas_path)
+                _all_source_cols = {
+                    (col["name"] if isinstance(col, dict) else col).lower()
+                    for cols in _source_schemas.values()
+                    for col in cols
+                }
+                if missing_column.lower() not in _all_source_cols:
+                    logger.info(
+                        "Fixer D3: coluna '%s' não existe em nenhuma tabela de origem "
+                        "(schemas.yaml) — é derivada, D3 ignorado",
+                        missing_column,
+                    )
+                    return (
+                        f"Coluna '{missing_column}' é derivada (não existe em nenhuma "
+                        "tabela de origem em schemas.yaml) — D3 ignorado"
+                    )
+            except Exception as _exc:  # noqa: BLE001
+                logger.debug("Fixer D3: não foi possível carregar schemas.yaml: %s", _exc)
+
         # Localiza todas as tabelas criadas como placeholder neste notebook
         placeholder_pattern = re.compile(
             r'spark\.sql\("CREATE TABLE IF NOT EXISTS\s+([\w.]+)\s+\(id BIGINT,\s*_placeholder',
@@ -857,6 +883,29 @@ class NotebookFixer:
         all_cols = self._extract_column_names(content)
         if missing_column not in all_cols:
             all_cols.insert(0, missing_column)
+
+        # Bug 1 — tabelas intermediárias: remove da lista de candidatas qualquer tabela
+        # que o próprio notebook escreve via saveAsTable. Essas tabelas são criadas pelo
+        # notebook em tempo de execução — D3 não deve injetar ALTER TABLE nem withColumn
+        # nelas (o schema é controlado pelo próprio notebook que as escreveu).
+        _nb_save_pat = re.compile(r'saveAsTable\s*\(\s*["\']([^"\']+)["\']\s*\)', re.IGNORECASE)
+        _nb_output_tables: set[str] = set()
+        for _sm in _nb_save_pat.finditer(content):
+            _tname = _sm.group(1).strip()
+            _nb_output_tables.add(_tname.lower())
+            _nb_output_tables.add(_tname.split(".")[-1].lower())
+
+        _nb_internal = [
+            t for t in tables
+            if t.lower() in _nb_output_tables or t.split(".")[-1].lower() in _nb_output_tables
+        ]
+        if _nb_internal:
+            logger.info(
+                "Fixer D3: %d tabela(s) excluídas por serem criadas pelo próprio notebook "
+                "(saveAsTable): %s",
+                len(_nb_internal), _nb_internal,
+            )
+            tables = [t for t in tables if t not in _nb_internal]
 
         # D3 — Schema Mutation Gate: separa tabelas owned vs external.
         # Owned (saveAsTable no notebook): ALTER TABLE é seguro — schema evolution Delta.

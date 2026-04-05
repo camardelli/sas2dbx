@@ -49,36 +49,49 @@ _RE_PARAM_TABLE = re.compile(
 )
 
 
-def load_table_schemas(schemas_path: Path) -> dict[str, list[str]]:
+def load_table_schemas(schemas_path: Path) -> dict[str, list[dict]]:
     """Carrega schemas de tabela de custom/schemas.yaml (ou migration schemas.yaml).
 
-    Formato YAML esperado:
+    Formato YAML esperado (novo, com tipos):
         telcostar.operacional.vendas_raw:
-          columns: [id_venda, id_cliente, id_plano, dt_venda, valor_bruto, ...]
-        telcostar.operacional.clientes_raw:
-          columns: [id_cliente, nome, cpf, email, status, ...]
+          columns:
+            - {name: id_venda, type: STRING}
+            - {name: valor_bruto, type: DOUBLE}
+
+    Backward compatible com formato antigo (apenas nomes):
+        telcostar.operacional.vendas_raw:
+          columns: [id_venda, id_cliente, ...]  # convertido para list[dict] automaticamente
 
     Args:
         schemas_path: Caminho para o arquivo schemas.yaml.
 
     Returns:
-        Dict table_fqn → list[column_name]. Vazio se arquivo não existe ou inválido.
+        Dict table_fqn → list[{"name": str, "type": str}]. Vazio se arquivo não existe.
     """
     if not schemas_path.exists():
         return {}
     try:
         import yaml  # type: ignore[import]
         raw = yaml.safe_load(schemas_path.read_text(encoding="utf-8")) or {}
-        result: dict[str, list[str]] = {}
+        result: dict[str, list[dict]] = {}
         for table, meta in raw.items():
             if isinstance(meta, dict):
-                cols = meta.get("columns") or meta.get("cols") or []
+                cols_raw = meta.get("columns") or meta.get("cols") or []
             elif isinstance(meta, list):
-                cols = meta
+                cols_raw = meta
             else:
                 continue
+            if not cols_raw:
+                continue
+            # Normaliza: strings antigas → {"name": col, "type": "STRING"}
+            cols: list[dict] = []
+            for c in cols_raw:
+                if isinstance(c, dict):
+                    cols.append({"name": str(c.get("name", "")), "type": str(c.get("type", "STRING"))})
+                else:
+                    cols.append({"name": str(c), "type": "STRING"})
             if cols:
-                result[str(table).lower()] = [str(c) for c in cols]
+                result[str(table).lower()] = cols
         return result
     except Exception as exc:  # noqa: BLE001
         logger.warning("load_table_schemas: erro ao ler %s — %s", schemas_path, exc)
@@ -86,10 +99,10 @@ def load_table_schemas(schemas_path: Path) -> dict[str, list[str]]:
 
 
 def enrich_schemas_from_errors(
-    schemas: dict[str, list[str]],
+    schemas: dict[str, list[dict]],
     error_messages: list[str],
     notebook_content: str = "",
-) -> dict[str, list[str]]:
+) -> dict[str, list[dict]]:
     """Enriquece o dicionário de schemas com colunas extraídas de erros Databricks.
 
     Quando Databricks retorna UNRESOLVED_COLUMN.WITH_SUGGESTION, ele lista as colunas
@@ -122,8 +135,13 @@ def enrich_schemas_from_errors(
             # Usa a primeira tabela como proxy; schemas existentes têm precedência
             for table in tables_in_notebook:
                 existing = schemas.get(table, [])
-                merged = list(dict.fromkeys(existing + suggested_cols))  # dedup, ordem
-                schemas[table] = merged
+                existing_names = {c["name"] for c in existing}
+                new_dicts = [
+                    {"name": c, "type": "STRING"}
+                    for c in suggested_cols
+                    if c not in existing_names
+                ]
+                schemas[table] = existing + new_dicts
                 logger.debug(
                     "enrich_schemas_from_errors: %s ← %d colunas extraídas do erro",
                     table, len(suggested_cols),
@@ -132,11 +150,11 @@ def enrich_schemas_from_errors(
     return schemas
 
 
-def format_schema_context(schemas: dict[str, list[str]]) -> str:
+def format_schema_context(schemas: dict[str, list[dict]]) -> str:
     """Formata schemas de tabela para injeção no prompt de transpilação.
 
     Args:
-        schemas: Dict table_fqn → list[column_name].
+        schemas: Dict table_fqn → list[{"name": str, "type": str}].
 
     Returns:
         String formatada, ex:
@@ -147,7 +165,7 @@ def format_schema_context(schemas: dict[str, list[str]]) -> str:
         return ""
     lines = []
     for table, cols in sorted(schemas.items()):
-        cols_str = ", ".join(cols)
+        cols_str = ", ".join(c["name"] for c in cols)
         lines.append(f"- {table}: {cols_str}")
     return "\n".join(lines)
 
@@ -180,7 +198,7 @@ def load_libnames(libnames_path: Path) -> dict[str, dict]:
 
 def extract_macro_resolutions(
     sas_code: str,
-    schemas: dict[str, list[str]],
+    schemas: dict[str, list[dict]],
     libnames: dict[str, dict],
 ) -> str:
     """Gera seção MACRO RESOLUTION para o prompt quando o bloco SAS usa macros paramétricas.
@@ -223,21 +241,21 @@ def extract_macro_resolutions(
             schema_name = lib_info.get("schema", "")
 
             # Busca colunas: FQN completo primeiro, depois short name como fallback
-            cols: list[str] = []
+            cols_dicts: list[dict] = []
             resolved_fqn = ""
             if catalog and schema_name:
                 resolved_fqn = f"{catalog}.{schema_name}.{table_name}"
-                cols = schemas.get(resolved_fqn, [])
+                cols_dicts = schemas.get(resolved_fqn, [])
 
-            if not cols:
+            if not cols_dicts:
                 for fqn_key, fqn_cols in schemas.items():
                     if fqn_key.split(".")[-1].lower() == table_name:
-                        cols = fqn_cols
+                        cols_dicts = fqn_cols
                         resolved_fqn = fqn_key
                         break
 
-            if cols:
-                cols_str = ", ".join(cols)
+            if cols_dicts:
+                cols_str = ", ".join(c["name"] for c in cols_dicts)
                 resolutions.append(
                     f"  &{param_name} = {lib_name}.{table_name} "
                     f"→ {resolved_fqn}\n"
@@ -245,7 +263,7 @@ def extract_macro_resolutions(
                 )
                 logger.debug(
                     "extract_macro_resolutions: %%%s &%s → %s (%d cols)",
-                    macro_name, param_name, resolved_fqn, len(cols),
+                    macro_name, param_name, resolved_fqn, len(cols_dicts),
                 )
 
         if resolutions:

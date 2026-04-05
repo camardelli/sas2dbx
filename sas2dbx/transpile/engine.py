@@ -97,20 +97,20 @@ class TranspilationEngine:
         # Injeta nomes de coluna reais no prompt para evitar que o LLM invente nomes.
         # _schemas_raw mantém o dict para filtragem por bloco; nunca injetar schemas de
         # tabelas de output para evitar contaminação cruzada entre jobs.
-        self._schemas_raw: dict[str, list[str]] = self._load_schema_raw(output_dir)
+        self._schemas_raw: dict[str, list[dict]] = self._load_schema_raw(output_dir)
         # Libnames para resolução de macro params (LIB.table → catalog.schema.table)
         self._libnames: dict[str, dict] = self._load_libnames(output_dir)
 
-    def _load_schema_raw(self, output_dir: Path) -> dict[str, list[str]]:
+    def _load_schema_raw(self, output_dir: Path) -> dict[str, list[dict]]:
         """Carrega schemas de custom/schemas.yaml e migration/schemas.yaml como dict bruto.
 
-        Retorna dict table_fqn → list[column_name] para filtragem por bloco.
+        Retorna dict table_fqn → list[{"name": str, "type": str}] para filtragem por bloco.
         """
         candidates = [
             output_dir.parent / "custom" / "schemas.yaml",  # global do projeto
             output_dir / "schemas.yaml",                     # específico da migração
         ]
-        schemas: dict[str, list[str]] = {}
+        schemas: dict[str, list[dict]] = {}
         for path in candidates:
             loaded = load_table_schemas(path)
             schemas.update(loaded)
@@ -165,7 +165,7 @@ class TranspilationEngine:
         # Extrai candidatos a nome de tabela do SAS: lib.table, lib.table.col ignorado
         sas_upper = sas_code.upper()
         # Coleta nomes curtos (após último ponto) de tabelas no schemas
-        relevant: dict[str, list[str]] = {}
+        relevant: dict[str, list[dict]] = {}
         for fqn, cols in self._schemas_raw.items():
             short = fqn.split(".")[-1].lower()
             # Inclui se o nome curto aparece em qualquer parte do código SAS

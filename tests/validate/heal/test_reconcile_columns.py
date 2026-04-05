@@ -22,14 +22,23 @@ def _validator() -> StaticNotebookValidator:
     return StaticNotebookValidator(catalog="telcostar", schema="operacional")
 
 
-# Schema mínimo que replica o ambiente TelcoStar
-VENDAS_SCHEMA = ["id_venda", "id_cliente", "id_plano", "id_vendedor",
-                  "dt_venda", "valor_bruto", "desconto_pct",
-                  "canal_venda", "tipo_transacao", "dt_primeira_compra"]
+def _schema(*names: str) -> list[dict]:
+    """Helper: converte nomes de coluna em list[dict] no novo formato."""
+    return [{"name": n, "type": "STRING"} for n in names]
 
-CLIENTES_SCHEMA = ["id_cliente", "nome", "cpf", "email",
-                    "telefone", "cidade", "uf", "dt_adesao",
-                    "dt_nascimento", "status", "id_vendedor_responsavel"]
+
+# Schema mínimo que replica o ambiente TelcoStar
+VENDAS_SCHEMA = _schema(
+    "id_venda", "id_cliente", "id_plano", "id_vendedor",
+    "dt_venda", "valor_bruto", "desconto_pct",
+    "canal_venda", "tipo_transacao", "dt_primeira_compra",
+)
+
+CLIENTES_SCHEMA = _schema(
+    "id_cliente", "nome", "cpf", "email",
+    "telefone", "cidade", "uf", "dt_adesao",
+    "dt_nascimento", "status", "id_vendedor_responsavel",
+)
 
 
 def _reconcile(code: str, schemas: dict) -> tuple[str, str | None]:
@@ -50,8 +59,6 @@ def test_vl_prefix_no_match_warns_only():
         'df = spark.read.table("telcostar.operacional.vendas_raw")\n'
         'df = df.withColumn("x", F.col("vl_venda") * 2)\n'
     )
-    schemas = {"telcostar.operacional.vendas_raw": {"columns": VENDAS_SCHEMA}}
-    # Normaliza formato para list[str] como retornado por load_table_schemas
     flat_schemas = {"telcostar.operacional.vendas_raw": VENDAS_SCHEMA}
     result, fix = _reconcile(code, flat_schemas)
     # vl_venda → valor_venda (não existe), similaridade 0.75 < 0.85 → não substitui

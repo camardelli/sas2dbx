@@ -468,7 +468,7 @@ class StaticNotebookValidator:
         return None
 
     def _reconcile_columns_with_schema(
-        self, content: str, schemas: dict[str, list[str]]
+        self, content: str, schemas: dict[str, list[dict]]
     ) -> tuple[str, str | None]:
         """Reconcilia nomes de coluna inventados pelo LLM contra o schema real.
 
@@ -498,8 +498,9 @@ class StaticNotebookValidator:
             short = table_fqn.split(".")[-1].lower()
             cols = schemas.get(table_fqn, schemas.get(short, []))
             for col in cols:
-                real_columns.add(col.lower())
-                col_to_table[col.lower()] = table_fqn.split(".")[-1]
+                col_name = col["name"] if isinstance(col, dict) else str(col)
+                real_columns.add(col_name.lower())
+                col_to_table[col_name.lower()] = table_fqn.split(".")[-1]
 
         if not real_columns:
             return content, None
