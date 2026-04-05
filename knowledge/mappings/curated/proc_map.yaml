@@ -32,13 +32,26 @@ IMPORT:
 MEANS:
   approach: llm
   tier: Tier.LLM
-  notes: "df.groupBy(class_vars).agg(F.count('var'), F.mean('var'), F.stddev('var'), F.min('var'), F.max('var')). Sem CLASS = agregação global: df.agg(). NWAY → apenas combinações completas (comportamento padrão do groupBy sem subtotais). OUTPUT OUT= com _TYPE_ e _FREQ_ requer lógica extra."
+  notes: |
+    df.groupBy(class_vars).agg(F.count('var'), F.mean('var'), F.stddev('var'), F.min('var'), F.max('var')).
+    Sem CLASS = agregação global: df.agg(). NWAY → apenas combinações completas (comportamento padrão do groupBy sem subtotais).
+    OUTPUT OUT= com _TYPE_ e _FREQ_: SEMPRE incluir F.count('*').alias('_FREQ_') no agg().
+    _TYPE_ identifica combinação de CLASS vars (bitmask SAS) — não tem equivalente direto no PySpark; omitir ou usar literal 0 se não usado downstream.
+    Se o código SAS subsequente referencia _FREQ_ (ex: clientes_cidade = _FREQ_; DROP _FREQ_;), o agg() DEVE conter F.count('*').alias('_FREQ_') para que withColumnRenamed ou rename funcione.
+    Padrão detectável: OUTPUT OUT=dataset <stat=colname> _FREQ_=nome → adicionar F.count('*').alias('nome') no agg().
   confidence: 0.8
 
 SUMMARY:
   approach: llm
   tier: Tier.LLM
-  notes: "Idêntico a PROC MEANS em termos de transpilação. Mesmo template e abordagem."
+  notes: |
+    Idêntico a PROC MEANS em termos de transpilação — mesmo template e abordagem.
+    CRÍTICO: PROC SUMMARY também gera _FREQ_ (contagem de observações por grupo) e _TYPE_ automaticamente no SAS.
+    No PySpark, _FREQ_ NÃO é gerado automaticamente — DEVE ser incluído como F.count('*').alias('_FREQ_') no agg().
+    Se bloco SAS posterior usa _FREQ_ (rename, keep, drop), o LLM DEVE incluir esse alias no groupBy().agg().
+    Exemplo SAS → PySpark:
+      SAS: PROC SUMMARY DATA=clientes NWAY; CLASS cidade; VAR valor; OUTPUT OUT=resumo _FREQ_=qtd_clientes MEAN(valor)=media_valor;
+      PySpark: df_resumo = clientes.groupBy('cidade').agg(F.count('*').alias('qtd_clientes'), F.mean('valor').alias('media_valor'))
   confidence: 0.8
 
 FREQ:

@@ -76,7 +76,7 @@ class DatabricksChecker:
             CheckResult com contagens, tabelas ausentes e schemas capturados.
         """
         sources = [e for e in entries if e.role == "SOURCE" and e.table_fqn]
-        result = CheckResult(total=len(sources))
+        result = CheckResult(total=len(sources), found=0)
 
         for entry in sources:
             assert entry.table_fqn is not None  # satisfaz type checker

@@ -75,3 +75,22 @@ CATX_IN_SQL:
   sas: "CATX('-', col1, col2, col3)"
   spark: "CONCAT_WS('-', TRIM(col1), TRIM(col2), TRIM(col3))"
   notes: "CATX não existe em Spark SQL. CATX remove espaços dos argumentos — usar TRIM em cada coluna antes do CONCAT_WS."
+
+PROC_SUMMARY_FREQ_TYPE:
+  sas: |
+    PROC SUMMARY DATA=ds NWAY; CLASS cidade; VAR valor;
+    OUTPUT OUT=resumo _FREQ_=qtd_clientes MEAN(valor)=media_valor;
+    /* _FREQ_ = contagem de observações por grupo (gerado automaticamente pelo SAS) */
+    /* _TYPE_ = bitmask identificando combinação de CLASS vars */
+  spark: |
+    df_resumo = ds.groupBy("cidade").agg(
+        F.count("*").alias("qtd_clientes"),   # _FREQ_ → sempre F.count("*")
+        F.mean("valor").alias("media_valor"),
+    )
+    # _TYPE_ não tem equivalente direto — omitir ou usar F.lit(0).alias("_TYPE_") se referenciado downstream
+  notes: |
+    CRÍTICO: SAS gera _FREQ_ e _TYPE_ automaticamente em OUTPUT OUT= de PROC MEANS/SUMMARY.
+    No PySpark, _FREQ_ NÃO existe — SEMPRE adicionar F.count('*').alias('_FREQ_') no agg() quando o OUTPUT OUT= usa _FREQ_ ou quando código SAS posterior referencia _FREQ_ (rename, keep, drop).
+    Padrão de detecção: OUTPUT OUT=dataset _FREQ_=nome → F.count('*').alias('nome').
+    Se código subsequente faz withColumnRenamed('_FREQ_', 'outro_nome'), o _FREQ_ deve ter sido criado no agg() anterior.
+    _TYPE_: omitir se não usado; se usado, substituir por F.lit(0).alias('_TYPE_') como placeholder.
