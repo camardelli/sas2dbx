@@ -260,12 +260,94 @@ def split_blocks(code: str, source_file: Path | None = None) -> list[SASBlock]:
         )
         blocks.append(_make_block(current_lines, block_start_line, len(lines), source_file))
 
+    # Pós-processamento: mescla %MACRO..%MEND com a(s) invocação(ões) consecutivas.
+    # Sem isso, o LLM transpila a definição e a invocação como blocos independentes —
+    # a definição não sabe os valores reais dos parâmetros (ex: ds_vendas=TELCO.vendas_raw)
+    # e a invocação não sabe o corpo da macro, gerando duas transpilações inconsistentes.
+    blocks = _merge_macro_with_invocations(blocks)
+
     logger.debug(
         "Reader: %d bloco(s) extraídos de %s",
         len(blocks),
         source_file or "<string>",
     )
     return blocks
+
+
+_RE_MACRO_DEF_NAME = re.compile(r"^\s*%MACRO\s+(\w+)", re.IGNORECASE)
+
+
+def _extract_macro_def_name(code: str) -> str | None:
+    """Retorna o nome da macro definida em um bloco %MACRO...%MEND, ou None."""
+    m = _RE_MACRO_DEF_NAME.search(code)
+    return m.group(1).lower() if m else None
+
+
+def _is_invocation_of(code: str, macro_name: str) -> bool:
+    """Retorna True se o código é uma invocação de %macro_name."""
+    pattern = re.compile(
+        r"^\s*%" + re.escape(macro_name) + r"\s*[\(;]",
+        re.IGNORECASE,
+    )
+    return bool(pattern.search(code))
+
+
+def _merge_macro_with_invocations(blocks: list[SASBlock]) -> list[SASBlock]:
+    """Mescla bloco %MACRO...%MEND com a(s) invocação(ões) consecutivas do mesmo nome.
+
+    Problema que resolve: quando %MACRO rfm_score...%MEND e %rfm_score(...) são
+    blocos separados, o LLM transpila cada um sem contexto do outro — a definição
+    ignora os valores reais dos parâmetros e a invocação ignora o corpo da macro.
+
+    A mesclagem entrega ao LLM definição + chamada como bloco único, permitindo
+    resolução completa de &ds_vendas → TELCO.vendas_raw → colunas reais.
+
+    Regras:
+    - Mescla bloco[i] (%MACRO X...%MEND) com TODOS os block[i+1], [i+2]...
+      consecutivos que sejam invocações de X (suporta múltiplas chamadas no mesmo job).
+    - Blocos de tipo diferente (PROC, DATA, invocação de outra macro) interrompem a mesclagem.
+    - Preserva start_line do bloco de definição e end_line do último invocado.
+    """
+    if len(blocks) < 2:
+        return blocks
+
+    result: list[SASBlock] = []
+    i = 0
+    while i < len(blocks):
+        block = blocks[i]
+        macro_name = _extract_macro_def_name(block.raw_code)
+
+        if macro_name is None:
+            result.append(block)
+            i += 1
+            continue
+
+        # Coleta todas as invocações consecutivas do mesmo macro
+        merged_code = block.raw_code
+        end_line = block.end_line
+        j = i + 1
+        while j < len(blocks) and _is_invocation_of(blocks[j].raw_code, macro_name):
+            merged_code = merged_code + "\n\n" + blocks[j].raw_code
+            end_line = blocks[j].end_line
+            j += 1
+
+        if j > i + 1:
+            # Pelo menos uma invocação foi mesclada
+            logger.debug(
+                "Reader: mesclando %%%s (%d bloco(s) de invocação) em bloco único",
+                macro_name,
+                j - i - 1,
+            )
+
+        result.append(SASBlock(
+            raw_code=merged_code,
+            start_line=block.start_line,
+            end_line=end_line,
+            source_file=block.source_file,
+        ))
+        i = j
+
+    return result
 
 
 def _make_block(

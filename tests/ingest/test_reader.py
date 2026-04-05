@@ -163,6 +163,115 @@ class TestIncompleteBlocks:
 # Fixtures reais
 # ---------------------------------------------------------------------------
 
+class TestMacroMerge:
+    """Testa a mesclagem de %MACRO...%MEND com invocações consecutivas."""
+
+    def test_macro_def_merged_with_single_invocation(self) -> None:
+        """%MACRO...%MEND + %macro_call() devem virar um único bloco."""
+        code = (
+            "%MACRO calc(ds_in=, ds_out=);\n"
+            "    DATA &ds_out; SET &ds_in; RUN;\n"
+            "%MEND calc;\n"
+            "\n"
+            "%calc(ds_in=TELCO.vendas, ds_out=DW.result);\n"
+        )
+        blocks = split_blocks(code)
+        assert len(blocks) == 1
+        assert "%MACRO" in blocks[0].raw_code.upper()
+        assert "%calc(" in blocks[0].raw_code.lower()
+        assert "TELCO.vendas" in blocks[0].raw_code
+
+    def test_macro_def_merged_with_multiple_invocations(self) -> None:
+        """Múltiplas invocações consecutivas da mesma macro devem ser mescladas."""
+        code = (
+            "%MACRO transform(ds=);\n"
+            "    PROC SQL; SELECT * FROM &ds; QUIT;\n"
+            "%MEND transform;\n"
+            "\n"
+            "%transform(ds=TELCO.a);\n"
+            "%transform(ds=TELCO.b);\n"
+        )
+        blocks = split_blocks(code)
+        assert len(blocks) == 1
+        assert "TELCO.a" in blocks[0].raw_code
+        assert "TELCO.b" in blocks[0].raw_code
+
+    def test_macro_def_not_merged_with_different_macro_call(self) -> None:
+        """Definição de macro_a NÃO deve mesclar com invocação de macro_b."""
+        code = (
+            "%MACRO macro_a(x=);\n"
+            "    DATA out; SET &x; RUN;\n"
+            "%MEND macro_a;\n"
+            "\n"
+            "%macro_b(y=TELCO.z);\n"
+        )
+        blocks = split_blocks(code)
+        assert len(blocks) == 2
+        assert "%MACRO" in blocks[0].raw_code.upper()
+        assert "%macro_b" in blocks[1].raw_code.lower()
+
+    def test_macro_def_followed_by_proc_not_merged(self) -> None:
+        """Definição de macro seguida de PROC SQL não deve ser mesclada."""
+        code = (
+            "%MACRO score(ds=);\n"
+            "    DATA &ds; x = 1; RUN;\n"
+            "%MEND score;\n"
+            "\n"
+            "PROC SQL;\n"
+            "    SELECT * FROM DW.result;\n"
+            "QUIT;\n"
+        )
+        blocks = split_blocks(code)
+        assert len(blocks) == 2
+        assert "%MEND" in blocks[0].raw_code.upper()
+        assert "PROC SQL" in blocks[1].raw_code.upper()
+
+    def test_macro_merge_preserves_start_line(self) -> None:
+        """start_line do bloco mesclado deve ser da definição da macro."""
+        code = (
+            "\n\n"
+            "%MACRO f(x=);\n"   # linha 3
+            "    DATA &x; RUN;\n"
+            "%MEND f;\n"
+            "\n"
+            "%f(x=TELCO.a);\n"
+        )
+        blocks = split_blocks(code)
+        assert len(blocks) == 1
+        assert blocks[0].start_line == 3
+
+    def test_rfm_scoring_pattern(self) -> None:
+        """Replica o padrão real do job_107: macro + invocação + PROC SQL separado."""
+        code = (
+            "%MACRO rfm_score(ds_vendas=, ds_clientes=, ds_out=);\n"
+            "    PROC SQL;\n"
+            "        CREATE TABLE _base AS SELECT valor_bruto FROM &ds_vendas;\n"
+            "    QUIT;\n"
+            "    DATA &ds_out; SET _base; RUN;\n"
+            "%MEND rfm_score;\n"
+            "\n"
+            "%rfm_score(\n"
+            "    ds_vendas=TELCO.vendas_raw,\n"
+            "    ds_clientes=TELCO.clientes_raw,\n"
+            "    ds_out=DW.rfm_clientes\n"
+            ");\n"
+            "\n"
+            "PROC SQL;\n"
+            "    CREATE TABLE DW.rfm_resumo AS\n"
+            "    SELECT rfm_segmento, COUNT(*) FROM DW.rfm_clientes\n"
+            "    GROUP BY rfm_segmento;\n"
+            "QUIT;\n"
+        )
+        blocks = split_blocks(code)
+        # Deve gerar 2 blocos: [macro+invocação, PROC SQL]
+        assert len(blocks) == 2
+        # Bloco 1: contém definição E invocação com parâmetros reais
+        assert "%MEND" in blocks[0].raw_code.upper()
+        assert "TELCO.vendas_raw" in blocks[0].raw_code
+        # Bloco 2: só o PROC SQL de resumo
+        assert "rfm_resumo" in blocks[1].raw_code.lower()
+
+
 class TestRealFixtures:
     def test_job001_has_libname_data_sort_sql(self) -> None:
         code, _ = read_sas_file(FIXTURES_DIR / "job_001_carga_clientes.sas")
