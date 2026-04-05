@@ -23,7 +23,14 @@ from sas2dbx.generate.notebook import Cell, CellModel, CellType, NotebookGenerat
 from sas2dbx.ingest.reader import read_sas_file, split_blocks
 from sas2dbx.models.migration_result import JobStatus, MigrationResult, SASOrigin
 from sas2dbx.models.sas_ast import SASBlock, SASFile, Tier
-from sas2dbx.transpile.llm.context import build_context, format_context_for_prompt
+from sas2dbx.transpile.llm.context import (
+    build_context,
+    extract_macro_resolutions,
+    format_context_for_prompt,
+    format_schema_context,
+    load_libnames,
+    load_table_schemas,
+)
 from sas2dbx.transpile.llm.prompts import (
     build_system_prompt,
     build_transpile_prompt,
@@ -86,6 +93,104 @@ class TranspilationEngine:
         self._ks_harvest_baseline: int = 0  # H.3: baseline de _harvest_attempted antes de run()
         # PP2-04: system prompt pré-calculado uma vez por engine instance — cacheado pela Anthropic
         self._system_prompt: str = build_system_prompt(catalog, schema)
+        # Schema das tabelas de origem — carregado de custom/schemas.yaml se existir.
+        # Injeta nomes de coluna reais no prompt para evitar que o LLM invente nomes.
+        # _schemas_raw mantém o dict para filtragem por bloco; nunca injetar schemas de
+        # tabelas de output para evitar contaminação cruzada entre jobs.
+        self._schemas_raw: dict[str, list[str]] = self._load_schema_raw(output_dir)
+        # Libnames para resolução de macro params (LIB.table → catalog.schema.table)
+        self._libnames: dict[str, dict] = self._load_libnames(output_dir)
+
+    def _load_schema_raw(self, output_dir: Path) -> dict[str, list[str]]:
+        """Carrega schemas de custom/schemas.yaml e migration/schemas.yaml como dict bruto.
+
+        Retorna dict table_fqn → list[column_name] para filtragem por bloco.
+        """
+        candidates = [
+            output_dir.parent / "custom" / "schemas.yaml",  # global do projeto
+            output_dir / "schemas.yaml",                     # específico da migração
+        ]
+        schemas: dict[str, list[str]] = {}
+        for path in candidates:
+            loaded = load_table_schemas(path)
+            schemas.update(loaded)
+            if loaded:
+                logger.info(
+                    "TranspilationEngine: %d schema(s) carregado(s) de %s",
+                    len(loaded), path,
+                )
+        return schemas
+
+    def _load_libnames(self, output_dir: Path) -> dict[str, dict]:
+        """Carrega knowledge/custom/libnames.yaml para resolução de macro params."""
+        candidates = [
+            output_dir.parent / "custom" / "libnames.yaml",
+            output_dir.parent.parent / "knowledge" / "custom" / "libnames.yaml",
+        ]
+        for path in candidates:
+            data = load_libnames(path)
+            if data:
+                logger.info(
+                    "TranspilationEngine: %d libname(s) carregado(s) de %s",
+                    len(data), path,
+                )
+                return data
+        return {}
+
+    def _macro_resolution_for_block(self, sas_code: str) -> str:
+        """Resolve parâmetros de macros paramétricas para tabelas e colunas reais.
+
+        Ex: %rfm_score(ds_vendas=TELCO.vendas_raw) → resolve &ds_vendas →
+        telcostar.operacional.vendas_raw → columns: id_venda, valor_bruto, ...
+
+        Retorna string formatada para injeção no prompt, ou "" se não aplicável.
+        """
+        return extract_macro_resolutions(sas_code, self._schemas_raw, self._libnames)
+
+    # Regex para extrair nomes de tabela do código SAS (forma lib.table ou apenas table)
+    _RE_SAS_TABLE = re.compile(r'\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)\b')
+
+    def _schema_context_for_block(self, sas_code: str) -> str:
+        """Retorna schema context filtrado para as tabelas referenciadas no bloco SAS.
+
+        Evita contaminação cruzada: se schemas.yaml tiver rfm_clientes (output de
+        run anterior) e o bloco SAS não referenciar essa tabela, ela não é injetada.
+
+        Heurística: compara o nome curto de cada tabela em schemas.yaml contra
+        identificadores pontilhados e palavras do código SAS.
+        """
+        if not self._schemas_raw:
+            return ""
+
+        # Extrai candidatos a nome de tabela do SAS: lib.table, lib.table.col ignorado
+        sas_upper = sas_code.upper()
+        # Coleta nomes curtos (após último ponto) de tabelas no schemas
+        relevant: dict[str, list[str]] = {}
+        for fqn, cols in self._schemas_raw.items():
+            short = fqn.split(".")[-1].lower()
+            # Inclui se o nome curto aparece em qualquer parte do código SAS
+            if short in sas_upper.lower():
+                relevant[fqn] = cols
+            else:
+                # Tenta também os segmentos intermediários (ex: "operacional" em lib.operacional.table)
+                parts = fqn.split(".")
+                if any(p.lower() in sas_upper.lower() for p in parts):
+                    relevant[fqn] = cols
+
+        if not relevant:
+            # Fallback: injeta tudo se nenhuma tabela foi identificada no bloco
+            # (bloco muito curto ou sem referência explícita de tabela)
+            logger.debug(
+                "TranspilationEngine: nenhuma tabela do schema identificada no bloco — injetando todos os %d schemas",
+                len(self._schemas_raw),
+            )
+            relevant = self._schemas_raw
+
+        logger.debug(
+            "TranspilationEngine: schema filtrado para bloco: %d/%d tabela(s)",
+            len(relevant), len(self._schemas_raw),
+        )
+        return format_schema_context(relevant)
 
     def run(self, sas_files: list[SASFile], execution_order: list[str]) -> list[MigrationResult]:
         """Executa a transpilação de todos os jobs na ordem fornecida.
@@ -244,10 +349,16 @@ class TranspilationEngine:
                         context_text = format_context_for_prompt(ctx)
 
                     # PP2-04: user message dinâmico + system prompt estático (cacheado)
+                    # Schema filtrado por bloco + resolução de macro params para evitar
+                    # invenção de colunas via variáveis &param que ocultam a tabela real.
+                    block_schema_ctx = self._schema_context_for_block(block.raw_code)
+                    macro_res = self._macro_resolution_for_block(block.raw_code)
                     user_msg = build_user_message(
                         sas_code=block.raw_code,
                         construct_type=classification.construct_type,
                         context_text=context_text,
+                        schema_context=block_schema_ctx,
+                        macro_resolution=macro_res,
                     )
                     response = self._llm_client.complete_sync(
                         user_msg, system=self._system_prompt

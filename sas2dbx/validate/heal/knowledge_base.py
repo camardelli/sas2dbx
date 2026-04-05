@@ -200,8 +200,11 @@ class HealingKnowledgeBase:
 
         entities: dict = getattr(diagnostic, "entities", {}) or {}
 
-        # Prioridade: suggestion → table_name → column_name → pattern_key
-        for field in ("suggestion", "table_name", "column_name"):
+        # Prioridade: bad_column → suggestion → table_name → column_name → pattern_key
+        # bad_column: coluna específica não resolvida (unresolved_column_suggestion) —
+        # deve ter precedência para que erros em colunas distintas recebam chaves
+        # diferentes no KB e não sejam confundidos com um loop (false positive).
+        for field in ("bad_column", "suggestion", "table_name", "column_name"):
             val = entities.get(field, "")
             if val:
                 # Normaliza: minúsculas, remove espaços extras

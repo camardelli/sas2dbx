@@ -42,6 +42,17 @@ REGRAS:
 11. Se encontrar construto que NÃO consegue converter com certeza, retorne:
    # WARNING: [tipo_construto] na linha [N] requer revisão manual
    # SAS original: [código]
+12. *** CRITICAL: COLUMN NAMES — ZERO TOLERANCE ***
+   You MUST use ONLY the exact column names listed in the TABLE SCHEMAS section.
+   NEVER invent, abbreviate, guess, or "normalize" column names — NOT EVEN ONCE.
+   The schema section is the ground truth; your training knowledge about naming conventions
+   is irrelevant and WRONG when it contradicts the schema.
+
+   MACRO VARIABLES: If the SAS code uses macro parameters like &ds_input or &col_name,
+   the MACRO RESOLUTION section (when present) has already resolved each parameter to
+   the real table and its exact column names. Use THOSE — not what you infer from the name.
+
+   Inventing a column name causes UNRESOLVED_COLUMN on Databricks and breaks the pipeline.
 
 CONTEXTO DO AMBIENTE:
 - Plataforma alvo: Databricks com Unity Catalog
@@ -51,9 +62,9 @@ CONTEXTO DO AMBIENTE:
 Responda APENAS com o código PySpark. Sem explicações fora dos comentários inline.\
 """
 
-# Parte dinâmica: contexto do Knowledge Store + DICA + bloco SAS
+# Parte dinâmica: resolução de macros + schemas + KS context + bloco SAS
 _USER_TEMPLATE = """\
-{context_section}\
+{macro_resolution}{context_section}\
 BLOCO SAS ({construct_type}):
 ```sas
 {sas_code}
@@ -145,32 +156,56 @@ def build_user_message(
     sas_code: str,
     construct_type: str,
     context_text: str = "",
+    schema_context: str = "",
+    macro_resolution: str = "",
 ) -> str:
     """PP2-04: Retorna a parte dinâmica do prompt (user message).
 
-    Contém contexto do Knowledge Store, dica de construct type e o bloco SAS.
+    Ordem de injeção (maior prioridade primeiro):
+      1. MACRO RESOLUTION — param → tabela real → colunas reais (previne invenção via &var)
+      2. TABLE SCHEMAS — nomes de coluna exatos (vincula à Regra 12 do system prompt)
+      3. KS context — mapeamentos de funções/PROCs do Knowledge Store
+      4. Construct hint — dica específica do tipo de construto
 
     Args:
         sas_code: Código SAS do bloco a transpilar.
         construct_type: Tipo do construct (ex: "PROC_SQL", "DATA_STEP_SIMPLE").
         context_text: Contexto formatado do Knowledge Store (pode ser vazio).
+        schema_context: Schema real das tabelas de origem (de schemas.yaml filtrado por bloco).
+        macro_resolution: Resolução de macro params → tabelas reais (de extract_macro_resolutions).
 
     Returns:
         User message pronta para envio.
     """
+    # 1. Macro resolution — vai antes de tudo para estabelecer a cadeia param→tabela→coluna
+    macro_section = ""
+    if macro_resolution.strip():
+        macro_section = macro_resolution + "\n"
+
     context_section = ""
-    if context_text.strip():
+
+    # 2. Schema das tabelas — referenciado pela Regra 12 do system prompt
+    if schema_context.strip():
         context_section = (
+            "TABLE SCHEMAS — USE APENAS ESTES NOMES DE COLUNA (ver Regra 12):\n"
+            f"{schema_context}\n\n"
+        )
+
+    # 3. KS context
+    if context_text.strip():
+        context_section += (
             "REFERÊNCIA TÉCNICA (do Knowledge Store — use como ground truth):\n"
             f"{context_text}\n\n"
         )
 
+    # 4. Dica por construct type
     hint = _CONSTRUCT_HINTS.get(construct_type, "")
     if hint:
         context_section += hint + "\n"
 
     return (
         _USER_TEMPLATE
+        .replace("{macro_resolution}", macro_section)
         .replace("{context_section}", context_section)
         .replace("{construct_type}", construct_type)
         .replace("{sas_code}", sas_code)

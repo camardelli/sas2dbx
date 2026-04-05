@@ -18,6 +18,7 @@ Padrões corrigidos:
   - F.col("flag_col") == 1 → F.col("flag_col") == "1" (colunas categóricas)
   - Literais de data SAS '01JAN2025'd → date('2025-01-01')
   - Literais datetime SAS '01JAN2025:00:00:00'dt → timestamp('2025-01-01 00:00:00')
+  - func("param=valor") → func(param=valor) (kwarg serializado como string pelo LLM)
 """
 
 from __future__ import annotations
@@ -189,6 +190,7 @@ class StaticNotebookValidator:
 
         _fixers = [
             self._remove_autofix_blocks,
+            self._fix_kwarg_as_string,           # deve rodar cedo — afeta SQL gerado
             self._fix_spark_conf_get,
             self._fix_wrong_catalog,
             self._fix_broken_write_calls,
@@ -226,6 +228,50 @@ class StaticNotebookValidator:
     # ------------------------------------------------------------------
     # Fixers internos
     # ------------------------------------------------------------------
+
+    # Padrão: func("param=valor") — kwarg serializado como string pelo LLM.
+    # Exemplos problemáticos:
+    #   gera_cohorts("meses_retro=18", spark=spark)  → gera_cohorts(meses_retro=18, spark=spark)
+    #   calcular_saldo("taxa=0.05", spark=spark)     → calcular_saldo(taxa=0.05, spark=spark)
+    # Causa TypeError: bad operand type ou UNRESOLVED_COLUMN quando o valor é
+    # usado em f-strings SQL (Spark lê o nome do parâmetro como nome de coluna).
+    _RE_KWARG_AS_STRING = re.compile(
+        r'(\w+)\(\s*["\']([A-Za-z_]\w*=[\d.]+)["\']\s*(,)',
+    )
+
+    def _fix_kwarg_as_string(self, content: str) -> tuple[str, str | None]:
+        """Converte func("param=valor") → func(param=valor).
+
+        O LLM transpilador às vezes converte `%macro(param=18)` para
+        `func("param=18", spark=spark)` — o argumento keyword é embutido
+        em uma string em vez de ser passado como kwarg Python.
+
+        Quando esse valor é depois usado em um f-string SQL (ex:
+        `f"SELECT ... -{meses_retro} ..."`) o Spark recebe a string
+        `"meses_retro=18"` como valor e ao tentar interpolá-la em SQL
+        a expressa como literal ou coluna não resolvida.
+
+        Fix: desembala o par key=value da string e o injeta como kwarg.
+        """
+        matches = list(self._RE_KWARG_AS_STRING.finditer(content))
+        if not matches:
+            return content, None
+
+        fixes: list[str] = []
+
+        def _unwrap(m: re.Match) -> str:
+            func_name = m.group(1)
+            kwarg_pair = m.group(2)   # ex: "meses_retro=18"
+            trailing_comma = m.group(3)
+            fixes.append(f'{func_name}("{kwarg_pair}") → {func_name}({kwarg_pair})')
+            return f'{func_name}({kwarg_pair}{trailing_comma}'
+
+        new_content = self._RE_KWARG_AS_STRING.sub(_unwrap, content)
+
+        if new_content == content:
+            return content, None
+
+        return new_content, f"kwarg-como-string corrigido em {len(fixes)} chamada(s): {'; '.join(fixes)}"
 
     def _remove_autofix_blocks(self, content: str) -> tuple[str, str | None]:
         """Remove blocos AUTO-FIX acumulados de iterações de healing anteriores."""

@@ -1,0 +1,40 @@
+# Schema das tabelas de origem no Databricks
+#
+# Quando preenchido, este arquivo é injetado no prompt de transpilação para
+# que o LLM use os nomes de coluna reais em vez de inventar baseado em
+# convenções genéricas (ex: vl_venda, id_pedido).
+#
+# Formato:
+#   catalog.schema.tabela:
+#     columns: [col1, col2, col3, ...]
+#
+# Pode ser preenchido manualmente ou complementado automaticamente pelo
+# sistema a partir das sugestões do Databricks (UNRESOLVED_COLUMN.WITH_SUGGESTION).
+#
+# Exemplo:
+# telcostar.operacional.vendas_raw:
+#   columns:
+#     - id_venda
+#     - id_cliente
+#     - id_plano
+#     - id_vendedor
+#     - dt_venda
+#     - valor_bruto
+#     - desconto_pct
+#     - canal_venda
+#     - tipo_transacao
+#     - dt_primeira_compra
+#
+# telcostar.operacional.clientes_raw:
+#   columns:
+#     - id_cliente
+#     - nome
+#     - cpf
+#     - email
+#     - telefone
+#     - cidade
+#     - uf
+#     - dt_adesao
+#     - dt_nascimento
+#     - status
+#     - id_vendedor_responsavel

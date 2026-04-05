@@ -1296,15 +1296,16 @@ class NotebookFixer:
             func("param=18", spark=spark)   # errado — 'param=18' é posicional, vira str
             func(param=18, spark=spark)     # correto — keyword argument
 
-        O erro em runtime é: TypeError: bad operand type for unary -: 'str'
-        quando o código usa -param_var com o valor sendo uma string.
+        Erros em runtime associados:
+          - TypeError: bad operand type for unary -: 'str'  (uso de -param_var)
+          - UNRESOLVED_COLUMN.WITHOUT_SUGGESTION (param usado em f-string SQL)
         """
         content = notebook_path.read_text(encoding="utf-8")
 
         # Padrão: func("nome_param=valor", ...) onde "nome_param=valor" é uma string
         # Captura: nome da função, nome do param, valor (int ou string sem aspas)
         _kwarg_str_pattern = re.compile(
-            r'(\w+)\(\s*["\']([A-Za-z_]\w*=\d+)["\']',
+            r'(\w+)\(\s*["\']([A-Za-z_]\w*=[\d.]+)["\']',
         )
 
         fixes = 0

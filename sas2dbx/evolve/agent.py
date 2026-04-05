@@ -163,6 +163,11 @@ TENTATIVAS DE FIX QUE FALHARAM
 {kb_context}
 
 ═══════════════════════════════════════════════════════════════
+SCHEMA REAL DAS TABELAS (extraído dos erros Databricks)
+═══════════════════════════════════════════════════════════════
+{schema_context}
+
+═══════════════════════════════════════════════════════════════
 CÓDIGO SAS ORIGINAL
 ═══════════════════════════════════════════════════════════════
 {sas_original}
@@ -336,6 +341,10 @@ class EvolutionAnalyzer:
             except Exception:  # noqa: BLE001
                 pass  # KB é melhor esforço — nunca bloqueia o EvolutionEngine
 
+        # Extrai schema das tabelas a partir dos erros de healing (UNRESOLVED_COLUMN suggestions)
+        # Permite que o LLM veja quais colunas realmente existem nas tabelas Databricks
+        schema_context = self._extract_schema_from_errors(error)
+
         return _PROMPT_TEMPLATE.format(
             num_attempts=len(error.healing_attempts),
             job_id=error.job_id,
@@ -345,10 +354,99 @@ class EvolutionAnalyzer:
             databricks_error=error.databricks_error[:2000],
             healing_attempts_text=attempts_text,
             kb_context=kb_context,
+            schema_context=schema_context,
             sas_original=error.sas_original[:3000],
             pyspark_snippet=pyspark_snippet,
             file_contents=file_contents,
         )
+
+    # Regex para extrair sugestões de coluna do Databricks
+    _RE_COL_SUGGESTIONS = re.compile(
+        r"Did you mean one of the following\?\s*\[([^\]]+)\]",
+        re.IGNORECASE,
+    )
+    # Regex para extrair o nome da coluna que falhou
+    _RE_COL_FAILED = re.compile(
+        r"with name\s+`?([A-Za-z_]\w*)`?\s+cannot be resolved",
+        re.IGNORECASE,
+    )
+    # Regex para nomes de tabela em spark.read.table() no notebook
+    _RE_TABLE_REF = re.compile(
+        r'spark\.(?:read\.table|table)\(\s*["\']([a-zA-Z0-9_.]+)["\']\s*\)',
+    )
+
+    def _extract_schema_from_errors(self, error: UnresolvedError) -> str:
+        """Extrai schema de tabelas a partir das sugestões nos erros de healing.
+
+        Quando Databricks retorna UNRESOLVED_COLUMN.WITH_SUGGESTION, lista as colunas
+        disponíveis na tabela. Consolida essas sugestões em um schema approximado e
+        inclui as colunas que falharam para deixar claro o que estava errado.
+
+        Returns:
+            String formatada para injeção no prompt, ex:
+              Tabelas referenciadas no notebook: [telcostar.operacional.vendas_raw]
+              Colunas disponíveis (sugeridas pelo Databricks):
+                [dt_venda, id_venda, canal_venda, id_plano, id_vendedor]
+              Colunas não encontradas (inventadas pelo LLM): [vl_venda, id_pedido]
+        """
+        # Coleta todas as mensagens de erro (erro principal + retest errors das tentativas)
+        all_errors: list[str] = [error.databricks_error or ""]
+        for att in error.healing_attempts:
+            if hasattr(att, "retest_error") and att.retest_error:
+                all_errors.append(att.retest_error)
+            if hasattr(att, "error_message") and att.error_message:
+                all_errors.append(att.error_message)
+
+        all_suggestions: list[str] = []
+        failed_cols: list[str] = []
+
+        for err_msg in all_errors:
+            for m in self._RE_COL_SUGGESTIONS.finditer(err_msg):
+                cols = [
+                    c.strip().strip("`").strip("'\"")
+                    for c in m.group(1).split(",")
+                    if c.strip().strip("`").strip("'\"")
+                ]
+                all_suggestions.extend(cols)
+            for m in self._RE_COL_FAILED.finditer(err_msg):
+                col = m.group(1).strip()
+                if col and col not in failed_cols:
+                    failed_cols.append(col)
+
+        # Dedup mantendo ordem
+        seen: set[str] = set()
+        unique_suggestions = []
+        for c in all_suggestions:
+            if c not in seen:
+                seen.add(c)
+                unique_suggestions.append(c)
+
+        if not unique_suggestions and not failed_cols:
+            return "(schema não disponível — nenhuma sugestão de coluna nos erros)"
+
+        # Tabelas referenciadas no notebook gerado
+        tables = list(dict.fromkeys(self._RE_TABLE_REF.findall(error.pyspark_generated)))
+
+        lines = []
+        if tables:
+            lines.append(f"Tabelas referenciadas no notebook: {tables}")
+        if unique_suggestions:
+            lines.append(
+                f"Colunas disponíveis nas tabelas (sugeridas pelo Databricks): "
+                f"[{', '.join(unique_suggestions)}]"
+            )
+        if failed_cols:
+            lines.append(
+                f"Colunas NÃO encontradas (LLM inventou — NÃO USE esses nomes): "
+                f"[{', '.join(failed_cols)}]"
+            )
+        if unique_suggestions:
+            lines.append(
+                "IMPORTANTE: ao propor fix, use APENAS as colunas listadas como 'disponíveis'. "
+                "Não invente nomes de coluna."
+            )
+
+        return "\n".join(lines)
 
     def _read_relevant_files(self, error_category: str) -> str:
         """Lê o conteúdo atual dos arquivos relevantes para incluir no prompt.
@@ -365,8 +463,12 @@ class EvolutionAnalyzer:
         # unresolved_column_suggestion: patterns.py (definição do padrão) +
         #   seção relevante do fixer.py (_fix_unresolved_column + _fix_placeholder_add_column)
         _FILES_BY_CATEGORY: dict[str, list[str]] = {
+            # unresolved_column_suggestion: inclui fixer.py para que o LLM veja
+            # a assinatura real de _fix_unresolved_column antes de propor old_string.
+            # Sem isso o LLM chuta a assinatura e o QualityGate rejeita por old_string não encontrado.
             "unresolved_column_suggestion": [
                 "sas2dbx/validate/heal/patterns.py",
+                "sas2dbx/validate/heal/fixer.py",
             ],
             "missing_table": [
                 "sas2dbx/validate/heal/patterns.py",

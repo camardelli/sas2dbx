@@ -909,6 +909,11 @@ function showDetail(id) {
   document.getElementById("validation-error").innerHTML = "";
   document.getElementById("btn-validate").disabled = false;
   document.getElementById("btn-validate").textContent = "Deploy & Executar no Databricks";
+  // Reseta btn-force-deploy — pode estar em "Forçando…"/disabled de sessão anterior
+  const _initForceBtn = document.getElementById("btn-force-deploy");
+  _initForceBtn.disabled = false;
+  _initForceBtn.textContent = "Forçar Deploy (ignorar warnings)";
+  document.getElementById("resume-validation-status").textContent = "";
   showLogBtn(true);
   startPolling(id);
 }
@@ -1308,6 +1313,11 @@ async function pollValidation(id) {
       document.getElementById("detail-validation-card").style.display = "none";
       document.getElementById("btn-validate").disabled = true;
       document.getElementById("btn-validate").textContent = "Aguardando tabelas…";
+      // Reseta btn-force-deploy caso tenha ficado em "Forçando…" de uma tentativa anterior
+      const _forceBtn = document.getElementById("btn-force-deploy");
+      _forceBtn.disabled = false;
+      _forceBtn.textContent = "Forçar Deploy (ignorar warnings)";
+      document.getElementById("resume-validation-status").textContent = "";
       renderPipelineStep("deploy", "pending", "Deploy", "Aguardando criação das tabelas de origem…");
       setTimeout(() => document.getElementById("btn-resume-validation").focus(), 100);
       renderPipelineStep("execution", "pending", "Execução", "—");

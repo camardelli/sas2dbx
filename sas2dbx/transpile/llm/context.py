@@ -11,6 +11,8 @@ report.py) continuam usando os lookups simples — validação não deve dispara
 from __future__ import annotations
 
 import logging
+import re
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -20,6 +22,245 @@ logger = logging.getLogger(__name__)
 
 # Limite de tokens para contexto injetado no prompt (configurável via sas2dbx.yaml)
 DEFAULT_MAX_CONTEXT_TOKENS = 2000
+
+# ---------------------------------------------------------------------------
+# Schema context — carrega custom/schemas.yaml e formata para o prompt
+# ---------------------------------------------------------------------------
+
+# Regex para extrair sugestões de coluna de erros Databricks:
+# "Did you mean one of the following? [`col1`, `col2`, `col3`]"
+_RE_COLUMN_SUGGESTIONS = re.compile(
+    r"Did you mean one of the following\?\s*\[([^\]]+)\]",
+    re.IGNORECASE,
+)
+# Extrai nomes de tabela de spark.read.table("cat.sch.table") no notebook
+_RE_TABLE_REF = re.compile(
+    r'spark\.(?:read\.table|table)\(\s*["\']([a-zA-Z0-9_.]+)["\']\s*\)',
+)
+# Macro call com parâmetros: %macro_name(param1=val1, param2=LIB.table, ...)
+_RE_MACRO_CALL = re.compile(
+    r'%([A-Za-z_]\w*)\s*\(([^)]*)\)',
+    re.IGNORECASE | re.DOTALL,
+)
+# Parâmetro que referencia tabela SAS: param=LIBNAME.dataset
+_RE_PARAM_TABLE = re.compile(
+    r'([A-Za-z_]\w*)\s*=\s*([A-Za-z_]\w+)\.([A-Za-z_]\w+)',
+    re.IGNORECASE,
+)
+
+
+def load_table_schemas(schemas_path: Path) -> dict[str, list[str]]:
+    """Carrega schemas de tabela de custom/schemas.yaml (ou migration schemas.yaml).
+
+    Formato YAML esperado:
+        telcostar.operacional.vendas_raw:
+          columns: [id_venda, id_cliente, id_plano, dt_venda, valor_bruto, ...]
+        telcostar.operacional.clientes_raw:
+          columns: [id_cliente, nome, cpf, email, status, ...]
+
+    Args:
+        schemas_path: Caminho para o arquivo schemas.yaml.
+
+    Returns:
+        Dict table_fqn → list[column_name]. Vazio se arquivo não existe ou inválido.
+    """
+    if not schemas_path.exists():
+        return {}
+    try:
+        import yaml  # type: ignore[import]
+        raw = yaml.safe_load(schemas_path.read_text(encoding="utf-8")) or {}
+        result: dict[str, list[str]] = {}
+        for table, meta in raw.items():
+            if isinstance(meta, dict):
+                cols = meta.get("columns") or meta.get("cols") or []
+            elif isinstance(meta, list):
+                cols = meta
+            else:
+                continue
+            if cols:
+                result[str(table).lower()] = [str(c) for c in cols]
+        return result
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("load_table_schemas: erro ao ler %s — %s", schemas_path, exc)
+        return {}
+
+
+def enrich_schemas_from_errors(
+    schemas: dict[str, list[str]],
+    error_messages: list[str],
+    notebook_content: str = "",
+) -> dict[str, list[str]]:
+    """Enriquece o dicionário de schemas com colunas extraídas de erros Databricks.
+
+    Quando Databricks retorna UNRESOLVED_COLUMN.WITH_SUGGESTION, ele lista as colunas
+    disponíveis na tabela. Extrai essas sugestões e as associa às tabelas referenciadas
+    no notebook, complementando o schemas.yaml existente.
+
+    Args:
+        schemas: Schemas existentes (modificado in-place).
+        error_messages: Lista de mensagens de erro Databricks.
+        notebook_content: Código do notebook (para extrair nomes de tabela).
+
+    Returns:
+        schemas enriquecido (mesmo objeto modificado in-place).
+    """
+    # Extrai tabelas referenciadas no notebook
+    tables_in_notebook = [m.lower() for m in _RE_TABLE_REF.findall(notebook_content)]
+
+    for error in error_messages:
+        matches = _RE_COLUMN_SUGGESTIONS.findall(error)
+        for match in matches:
+            # Normaliza: remove backticks e espaços
+            suggested_cols = [
+                c.strip().strip("`").strip("'\"")
+                for c in match.split(",")
+                if c.strip().strip("`").strip("'\"")
+            ]
+            if not suggested_cols:
+                continue
+            # Associa às tabelas do notebook (melhor esforço — sem schema info do Databricks)
+            # Usa a primeira tabela como proxy; schemas existentes têm precedência
+            for table in tables_in_notebook:
+                existing = schemas.get(table, [])
+                merged = list(dict.fromkeys(existing + suggested_cols))  # dedup, ordem
+                schemas[table] = merged
+                logger.debug(
+                    "enrich_schemas_from_errors: %s ← %d colunas extraídas do erro",
+                    table, len(suggested_cols),
+                )
+
+    return schemas
+
+
+def format_schema_context(schemas: dict[str, list[str]]) -> str:
+    """Formata schemas de tabela para injeção no prompt de transpilação.
+
+    Args:
+        schemas: Dict table_fqn → list[column_name].
+
+    Returns:
+        String formatada, ex:
+            - telcostar.operacional.vendas_raw: id_venda, id_cliente, valor_bruto, ...
+            - telcostar.operacional.clientes_raw: id_cliente, nome, status, ...
+    """
+    if not schemas:
+        return ""
+    lines = []
+    for table, cols in sorted(schemas.items()):
+        cols_str = ", ".join(cols)
+        lines.append(f"- {table}: {cols_str}")
+    return "\n".join(lines)
+
+def load_libnames(libnames_path: Path) -> dict[str, dict]:
+    """Carrega libnames.yaml → dict LIBNAME_UPPER → {catalog, schema}.
+
+    Args:
+        libnames_path: Caminho para knowledge/custom/libnames.yaml.
+
+    Returns:
+        Dict normalizado com chaves em maiúsculas. Vazio se arquivo não existe.
+    """
+    if not libnames_path.exists():
+        return {}
+    try:
+        import yaml  # type: ignore[import]
+        raw = yaml.safe_load(libnames_path.read_text(encoding="utf-8")) or {}
+        result: dict[str, dict] = {}
+        for lib, meta in raw.items():
+            if isinstance(meta, dict):
+                result[str(lib).upper()] = {
+                    "catalog": str(meta.get("catalog", "")),
+                    "schema": str(meta.get("schema", "")),
+                }
+        return result
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("load_libnames: erro ao ler %s — %s", libnames_path, exc)
+        return {}
+
+
+def extract_macro_resolutions(
+    sas_code: str,
+    schemas: dict[str, list[str]],
+    libnames: dict[str, dict],
+) -> str:
+    """Gera seção MACRO RESOLUTION para o prompt quando o bloco SAS usa macros paramétricas.
+
+    Problema que resolve: o LLM recebe `&ds_vendas` como referência de coluna/tabela
+    e não sabe que esse parâmetro foi instanciado com `ds_vendas=TELCO.vendas_raw`.
+    Sem essa resolução explícita, o LLM "normaliza" colunas (inventa `vl_venda` em vez
+    de usar `valor_bruto` do schema real).
+
+    Para cada chamada %macro_name(param=LIB.table), resolve:
+      LIB → catalog.schema  (via libnames.yaml)
+      catalog.schema.table → colunas reais  (via schemas.yaml)
+
+    Args:
+        sas_code: Código SAS do bloco a transpilar.
+        schemas: Dict FQN → colunas (de load_table_schemas / schemas.yaml).
+        libnames: Dict LIBNAME_UPPER → {catalog, schema} (de load_libnames).
+
+    Returns:
+        String formatada para injeção no prompt, ou "" se não houver macros resolvíveis.
+    """
+    if not sas_code.strip():
+        return ""
+
+    lines: list[str] = []
+
+    for macro_match in _RE_MACRO_CALL.finditer(sas_code):
+        macro_name = macro_match.group(1)
+        params_str = macro_match.group(2)
+
+        resolutions: list[str] = []
+        for param_match in _RE_PARAM_TABLE.finditer(params_str):
+            param_name = param_match.group(1)
+            lib_name = param_match.group(2).upper()
+            table_name = param_match.group(3).lower()
+
+            # Resolve LIBNAME → catalog.schema
+            lib_info = libnames.get(lib_name, {})
+            catalog = lib_info.get("catalog", "")
+            schema_name = lib_info.get("schema", "")
+
+            # Busca colunas: FQN completo primeiro, depois short name como fallback
+            cols: list[str] = []
+            resolved_fqn = ""
+            if catalog and schema_name:
+                resolved_fqn = f"{catalog}.{schema_name}.{table_name}"
+                cols = schemas.get(resolved_fqn, [])
+
+            if not cols:
+                for fqn_key, fqn_cols in schemas.items():
+                    if fqn_key.split(".")[-1].lower() == table_name:
+                        cols = fqn_cols
+                        resolved_fqn = fqn_key
+                        break
+
+            if cols:
+                cols_str = ", ".join(cols)
+                resolutions.append(
+                    f"  &{param_name} = {lib_name}.{table_name} "
+                    f"→ {resolved_fqn}\n"
+                    f"  columns available: {cols_str}"
+                )
+                logger.debug(
+                    "extract_macro_resolutions: %%%s &%s → %s (%d cols)",
+                    macro_name, param_name, resolved_fqn, len(cols),
+                )
+
+        if resolutions:
+            lines.append(f"%{macro_name} parameter resolution:")
+            lines.extend(resolutions)
+
+    if not lines:
+        return ""
+
+    return (
+        "MACRO RESOLUTION — parâmetros resolvidos para tabelas reais:\n"
+        + "\n".join(lines)
+        + "\n"
+    )
+
 
 # PP2-03: Claude usa ~3.5 chars/token (cl100k_base medido empiricamente)
 _CHARS_PER_TOKEN = 3.5

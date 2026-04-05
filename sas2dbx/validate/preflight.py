@@ -153,6 +153,8 @@ class PreflightChecker:
 
         # Verifica existência via Databricks API
         report = PreflightReport(checked_tables=len(table_to_notebooks))
+        # Schemas coletados via DESCRIBE TABLE (tabelas que existem) → salvo em schemas.yaml
+        discovered_schemas: dict[str, list[str]] = {}
         try:
             from databricks.sdk import WorkspaceClient
             client = WorkspaceClient(
@@ -160,9 +162,18 @@ class PreflightChecker:
                 token=self._config.token,
             )
             for table_name, nbs in sorted(table_to_notebooks.items()):
-                exists = self._table_exists(client, table_name)
+                # Busca TableInfo uma única vez — evita segunda chamada de rede para schema
+                table_info = self._get_table_info(client, table_name)
+                exists = table_info is not None
                 if exists:
                     report.existing_tables.append(table_name)
+                    # Coleta schema da tabela existente para injetar no prompt de transpilação
+                    cols = [
+                        col.name for col in (getattr(table_info, "columns", None) or [])
+                        if getattr(col, "name", None)
+                    ]
+                    if cols:
+                        discovered_schemas[table_name] = cols
                 else:
                     suggestion = self._suggest_action(table_name)
                     report.ghost_sources.append(
@@ -189,11 +200,60 @@ class PreflightChecker:
                 skip_reason=f"falha na conexão Databricks: {type(exc).__name__}",
             )
 
+        # Persiste schemas descobertos em schemas.yaml para uso no próximo ciclo de transpilação.
+        # Exclui tabelas de output (criadas pelos próprios notebooks via saveAsTable/CREATE TABLE)
+        # para evitar contaminação cruzada: schemas de saídas de runs anteriores com colunas
+        # inventadas pelo LLM não devem influenciar prompts de transpilação futuros.
+        if discovered_schemas:
+            output_tables = self._extract_output_tables(notebooks)
+            source_schemas = {
+                t: cols
+                for t, cols in discovered_schemas.items()
+                if t.split(".")[-1].lower() not in output_tables
+                and t.lower() not in output_tables
+            }
+            if source_schemas:
+                self._save_schemas(output_dir, source_schemas)
+            skipped = set(discovered_schemas) - set(source_schemas)
+            if skipped:
+                logger.info(
+                    "PreflightChecker: %d schema(s) de tabela(s) de output excluído(s) de schemas.yaml: %s",
+                    len(skipped),
+                    ", ".join(sorted(skipped)),
+                )
+
         # Categoriza tabelas ausentes: upstream (criadas por notebook irmão) vs source
         if report.ghost_sources:
             self._categorize_ghosts(report.ghost_sources, notebooks, execution_order)
 
         return report
+
+    def _extract_output_tables(self, notebooks: list[Path]) -> set[str]:
+        """Retorna conjunto de nomes de tabela (normalizados) criados pelos notebooks.
+
+        Coleta tanto o nome completo (catalog.schema.table) quanto o nome curto (table)
+        para permitir filtragem independente do catalog/schema prefix nos schemas.
+        """
+        _save_pat = re.compile(r'saveAsTable\(\s*["\']([^"\']+)["\']\s*\)', re.IGNORECASE)
+        _create_pat = re.compile(
+            r'CREATE\s+(?:OR\s+REPLACE\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?'
+            r'([`"\']?[\w]+(?:\.[\w]+){0,2}[`"\']?)',
+            re.IGNORECASE,
+        )
+        output_tables: set[str] = set()
+        for nb in notebooks:
+            try:
+                content = nb.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            for pat in (_save_pat, _create_pat):
+                for m in pat.finditer(content):
+                    full = m.group(1).strip("`\"'")
+                    if not full or len(full) < 3:
+                        continue
+                    output_tables.add(full.lower())
+                    output_tables.add(full.split(".")[-1].lower())
+        return output_tables
 
     def _categorize_ghosts(
         self,
@@ -380,13 +440,61 @@ class PreflightChecker:
             and t.split(".")[0].lower() not in _PYTHON_MODULE_PREFIXES
         ]
 
+    def _get_table_info(self, client, table_name: str):
+        """Retorna TableInfo da tabela ou None se não existir.
+
+        Unifica a verificação de existência + coleta de schema em uma única
+        chamada de rede, evitando o double-fetch de _table_exists + _fetch_columns.
+        """
+        try:
+            return client.tables.get(table_name)
+        except Exception:  # noqa: BLE001
+            return None
+
     def _table_exists(self, client, table_name: str) -> bool:
         """Verifica se a tabela existe no catálogo Databricks."""
+        return self._get_table_info(client, table_name) is not None
+
+    def _save_schemas(self, output_dir: Path, schemas: dict[str, list[str]]) -> None:
+        """Persiste schemas descobertos em output_dir/schemas.yaml.
+
+        O TranspilationEngine lê este arquivo via _load_schema_raw() e injeta
+        os nomes de coluna reais no prompt de transpilação, evitando que o LLM
+        invente colunas baseado em convenções genéricas.
+
+        O arquivo é criado/atualizado de forma incremental: entradas existentes
+        são preservadas e novas tabelas são adicionadas (mas nunca removidas).
+
+        Args:
+            output_dir: Diretório de saída dos notebooks da migração.
+            schemas: Dict table_fqn → list[column_name] coletado do Databricks.
+        """
+        schemas_path = output_dir / "schemas.yaml"
         try:
-            client.tables.get(table_name)
-            return True
-        except Exception:  # noqa: BLE001
-            return False
+            import yaml  # type: ignore[import]
+
+            # Carrega existente (se houver) para merge incremental
+            existing: dict = {}
+            if schemas_path.exists():
+                existing = yaml.safe_load(schemas_path.read_text(encoding="utf-8")) or {}
+
+            # Merge: novas tabelas adicionadas; existentes preservadas (curadoria manual tem precedência)
+            for table, cols in schemas.items():
+                if table not in existing:
+                    existing[table] = {"columns": cols}
+
+            schemas_path.write_text(
+                yaml.dump(existing, allow_unicode=True, default_flow_style=False),
+                encoding="utf-8",
+            )
+            logger.info(
+                "PreflightChecker: schemas de %d tabela(s) salvo(s) em %s",
+                len(schemas), schemas_path,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "PreflightChecker: falha ao salvar schemas.yaml — %s", exc
+            )
 
     def inject_placeholder_bootstrap(
         self, notebook_path: Path, ghosts: list[GhostSource]

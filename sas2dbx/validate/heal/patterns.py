@@ -53,10 +53,29 @@ ERROR_PATTERNS: dict[str, ErrorPattern] = {
             ),
         },
     },
+    "column_not_found_no_suggestion": {
+        # UNRESOLVED_COLUMN.WITHOUT_SUGGESTION — frequentemente causado por
+        # kwarg-como-string: func("param=18") → param usado em f-string SQL
+        # → Spark SQL vê "param" como nome de coluna não resolvida.
+        # O fixer verifica se o padrão kwarg-como-string existe antes de aplicar.
+        "pattern": re.compile(
+            r"UNRESOLVED_COLUMN\.WITHOUT_SUGGESTION",
+            re.IGNORECASE,
+        ),
+        "category": "unresolved_column_no_suggestion",
+        "deterministic_fix": "fix_kwarg_as_string",
+        "severity": "HIGH",
+        "entity_extractors": {
+            "bad_column": re.compile(
+                r"with name\s+`?([\w]+)`?\s+cannot be resolved",
+                re.IGNORECASE,
+            ),
+        },
+    },
     "column_not_found": {
         "pattern": re.compile(
             r"cannot resolve[`'\s]+([\w.]+)[`'\s]+given input columns"
-            r"|UNRESOLVED_COLUMN(?!\.WITH_SUGGESTION)"
+            r"|UNRESOLVED_COLUMN(?!\.WITH(?:OUT)?_SUGGESTION)"
             r"|AnalysisException[:\s]+.*cannot resolve",
             re.IGNORECASE,
         ),
