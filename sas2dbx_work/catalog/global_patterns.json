@@ -1,0 +1,146 @@
+{
+  "version": "1.0",
+  "created_at": "2026-04-03T03:03:06+00:00",
+  "updated_at": "2026-04-03T03:44:58+00:00",
+  "conversion_patterns": [],
+  "error_catalog": [
+    {
+      "pattern_key": "syntax_error",
+      "symptom": "syntax",
+      "category": "syntax",
+      "occurrences": 1,
+      "auto_fixed": 0,
+      "first_seen": "2026-04-03T03:07:58+00:00",
+      "last_seen": "2026-04-03T03:07:58+00:00",
+      "example_notebook": "job_complexo_analise_churn"
+    },
+    {
+      "pattern_key": "table_not_found",
+      "symptom": "missing_table",
+      "category": "missing_table",
+      "occurrences": 1,
+      "auto_fixed": 0,
+      "first_seen": "2026-04-03T03:17:04+00:00",
+      "last_seen": "2026-04-03T03:17:04+00:00",
+      "example_notebook": "job_complexo_analise_churn"
+    },
+    {
+      "pattern_key": "column_not_found_with_suggestion",
+      "symptom": "unresolved_column_suggestion",
+      "category": "unresolved_column_suggestion",
+      "occurrences": 1,
+      "auto_fixed": 0,
+      "first_seen": "2026-04-03T03:44:58+00:00",
+      "last_seen": "2026-04-03T03:44:58+00:00",
+      "example_notebook": "job_complexo_analise_churn"
+    }
+  ],
+  "ghost_sources": [
+    {
+      "table_name": "STAGING.",
+      "occurrences": 3,
+      "example_notebook": "job_complexo_analise_churn",
+      "migrations": [
+        "0b79132f-73be-4d92-9dd4-0d3d1a725a1a"
+      ],
+      "first_seen": "2026-04-03T03:06:39+00:00",
+      "last_seen": "2026-04-03T03:42:55+00:00"
+    },
+    {
+      "table_name": "pyspark.sql",
+      "occurrences": 3,
+      "example_notebook": "job_complexo_analise_churn",
+      "migrations": [
+        "0b79132f-73be-4d92-9dd4-0d3d1a725a1a"
+      ],
+      "first_seen": "2026-04-03T03:06:39+00:00",
+      "last_seen": "2026-04-03T03:42:55+00:00"
+    },
+    {
+      "table_name": "pyspark.sql.functions",
+      "occurrences": 3,
+      "example_notebook": "job_complexo_analise_churn",
+      "migrations": [
+        "0b79132f-73be-4d92-9dd4-0d3d1a725a1a"
+      ],
+      "first_seen": "2026-04-03T03:06:39+00:00",
+      "last_seen": "2026-04-03T03:42:55+00:00"
+    },
+    {
+      "table_name": "pyspark.sql.window",
+      "occurrences": 3,
+      "example_notebook": "job_complexo_analise_churn",
+      "migrations": [
+        "0b79132f-73be-4d92-9dd4-0d3d1a725a1a"
+      ],
+      "first_seen": "2026-04-03T03:06:39+00:00",
+      "last_seen": "2026-04-03T03:42:55+00:00"
+    },
+    {
+      "table_name": "scipy.stats",
+      "occurrences": 3,
+      "example_notebook": "job_complexo_analise_churn",
+      "migrations": [
+        "0b79132f-73be-4d92-9dd4-0d3d1a725a1a"
+      ],
+      "first_seen": "2026-04-03T03:06:39+00:00",
+      "last_seen": "2026-04-03T03:42:55+00:00"
+    },
+    {
+      "table_name": "telcostar.operacional.<nome>",
+      "occurrences": 3,
+      "example_notebook": "job_complexo_analise_churn",
+      "migrations": [
+        "0b79132f-73be-4d92-9dd4-0d3d1a725a1a"
+      ],
+      "first_seen": "2026-04-03T03:06:39+00:00",
+      "last_seen": "2026-04-03T03:42:55+00:00"
+    },
+    {
+      "table_name": "telcostar.operacional.minha_tabela",
+      "occurrences": 3,
+      "example_notebook": "job_complexo_analise_churn",
+      "migrations": [
+        "0b79132f-73be-4d92-9dd4-0d3d1a725a1a"
+      ],
+      "first_seen": "2026-04-03T03:06:39+00:00",
+      "last_seen": "2026-04-03T03:42:55+00:00"
+    },
+    {
+      "table_name": "telcostar.operacional.pre_pivot",
+      "occurrences": 3,
+      "example_notebook": "job_complexo_analise_churn",
+      "migrations": [
+        "0b79132f-73be-4d92-9dd4-0d3d1a725a1a"
+      ],
+      "first_seen": "2026-04-03T03:06:39+00:00",
+      "last_seen": "2026-04-03T03:42:55+00:00"
+    },
+    {
+      "table_name": "telcostar.operacional.tabela",
+      "occurrences": 3,
+      "example_notebook": "job_complexo_analise_churn",
+      "migrations": [
+        "0b79132f-73be-4d92-9dd4-0d3d1a725a1a"
+      ],
+      "first_seen": "2026-04-03T03:06:39+00:00",
+      "last_seen": "2026-04-03T03:42:55+00:00"
+    },
+    {
+      "table_name": "telcostar.operacional.uso_mensal",
+      "occurrences": 3,
+      "example_notebook": "job_complexo_analise_churn",
+      "migrations": [
+        "0b79132f-73be-4d92-9dd4-0d3d1a725a1a"
+      ],
+      "first_seen": "2026-04-03T03:06:39+00:00",
+      "last_seen": "2026-04-03T03:42:55+00:00"
+    }
+  ],
+  "reuse_rate_by_wave": [],
+  "stats": {
+    "total_migrations": 1,
+    "total_healings": 3,
+    "auto_fixed": 0
+  }
+}

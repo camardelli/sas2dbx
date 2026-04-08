@@ -1,6 +1,6 @@
 {
   "migration_id": "0b79132f-73be-4d92-9dd4-0d3d1a725a1a",
-  "status": "processing",
+  "status": "done",
   "created_at": "2026-04-03T02:56:08.974+00:00",
   "config": {
     "autoexec_filename": "autoexec.sas",
@@ -32,26 +32,169 @@
     {
       "id": "transpile",
       "label": "Transpilando para PySpark",
-      "status": "running",
-      "detail": "0 / 1 jobs"
+      "status": "done",
+      "detail": "1 / 1 jobs concluídos"
     },
     {
       "id": "document",
       "label": "Gerando documentação por job",
-      "status": "pending",
-      "detail": ""
+      "status": "done",
+      "detail": "1 job(s) documentados"
     },
     {
       "id": "architecture",
       "label": "Gerando ARCHITECTURE.md",
-      "status": "pending",
+      "status": "done",
       "detail": ""
     },
     {
       "id": "explorer",
       "label": "Gerando explorer interativo",
-      "status": "pending",
+      "status": "done",
       "detail": ""
+    }
+  ],
+  "warnings": [
+    "job_complexo_analise_churn.sas: Arquivo lido como UTF-8 mas contém 8 byte(s) típicos de latin-1 — possível encoding incorreto; verificar se dados de entrada estão em cp1252/latin-1."
+  ],
+  "semantic_risks": {
+    "reports": [
+      {
+        "notebook": "job_complexo_analise_churn",
+        "summary": "2 risco(s): SR-001, SR-005",
+        "risks": [
+          {
+            "code": "SR-001",
+            "description": "JOIN sem verificação de cardinalidade — risco de explosão de linhas",
+            "mitigation": "Adicionar assert df.count() == expected ou verificar unicidade das chaves antes do join",
+            "line": 191
+          },
+          {
+            "code": "SR-005",
+            "description": "cast() numérico sem tratamento de erro — valores não-numéricos viram NULL silenciosamente",
+            "mitigation": "Usar F.try_cast() (Spark 3.4+) ou adicionar filtro de validação antes do cast",
+            "line": 225
+          }
+        ]
+      }
+    ]
+  },
+  "reconciliation": {
+    "notebooks": [
+      "job_complexo_analise_churn_reconciliation.py"
+    ],
+    "count": 1
+  },
+  "validation": {
+    "status": "done",
+    "report": {
+      "summary": {
+        "total_notebooks": 1,
+        "notebooks_ok": 0,
+        "notebooks_failed": 1,
+        "notebooks_skipped": 0,
+        "total_rows_collected": 0,
+        "overall_status": "failed"
+      },
+      "notebooks": [
+        {
+          "name": "job_complexo_analise_churn",
+          "index": 1,
+          "total": 1,
+          "job_id": 237416243486118,
+          "workspace_path": "/sas2dbx_migrations/job_complexo_analise_churn",
+          "run_id": 391436791545027,
+          "status": "FAILED",
+          "duration_ms": 43417,
+          "error": "[UNRESOLVED_COLUMN.WITH_SUGGESTION] A column, variable, or function parameter with name `h`.`motivo_cancelamento` cannot be resolved. Did you mean one of the following? [`h`.`dt_cancelamento`, `s`.`dt_cancelamento`, `s`.`cd_segmento`, `h`.`cd_segmento`, `s`.`id_cliente`]. SQLSTATE: 42703"
+        }
+      ],
+      "tables": []
+    }
+  },
+  "healings": {
+    "4e04b86a-068a-475b-a480-e5b88fd37174": {
+      "status": "done",
+      "healed": false,
+      "iterations": 1,
+      "strategy": "none",
+      "description": "Nenhuma sugestão de correção automática disponível.",
+      "static_fixes_applied": 0,
+      "upstream_fix_needed": null,
+      "error": null,
+      "evolution": {
+        "proposal_generated": false,
+        "gate_decision": "NO_PROPOSAL",
+        "applied": false,
+        "quarantine_entry_id": null,
+        "fix_type": "",
+        "risk_level": "",
+        "description": "",
+        "elapsed_seconds": 181.57
+      }
+    },
+    "5d798b09-aaa5-4564-b0bd-dd64aaa665ac": {
+      "status": "done",
+      "healed": false,
+      "iterations": 2,
+      "strategy": "deterministic",
+      "description": "Created placeholder table: telcostar.operacional.historico_cancelamentos (+ overwriteSchema preventivo)",
+      "static_fixes_applied": 1,
+      "upstream_fix_needed": null,
+      "error": null,
+      "evolution": {
+        "proposal_generated": false,
+        "gate_decision": "NO_PROPOSAL",
+        "applied": false,
+        "quarantine_entry_id": null,
+        "fix_type": "",
+        "risk_level": "",
+        "description": "",
+        "elapsed_seconds": 181.67
+      }
+    },
+    "92a45169-bad6-4263-a7f4-9e528837aa94": {
+      "status": "done",
+      "healed": false,
+      "iterations": 2,
+      "strategy": "deterministic",
+      "description": "Coluna não resolvida ou sugestão não identificada na mensagem de erro",
+      "static_fixes_applied": 0,
+      "upstream_fix_needed": null,
+      "error": null,
+      "evolution": {
+        "proposal_generated": true,
+        "gate_decision": "QUARANTINE",
+        "applied": false,
+        "quarantine_entry_id": "73f5a585-b98",
+        "fix_type": "error_pattern",
+        "risk_level": "low",
+        "description": "Adiciona pattern para UNRESOLVED_COLUMN.WITH_SUGGESTION: extrai coluna e sugestões do erro e remove/qualifica a referência ambígua no código gerado.",
+        "elapsed_seconds": 81.58
+      }
+    }
+  },
+  "healing_history": [
+    {
+      "fix_key": "syntax_error",
+      "category": "syntax",
+      "notebook": "job_complexo_analise_churn",
+      "healed": false,
+      "static_fixes_applied": 0
+    },
+    {
+      "fix_key": "table_not_found",
+      "category": "missing_table",
+      "notebook": "job_complexo_analise_churn",
+      "healed": false,
+      "static_fixes_applied": 1
+    },
+    {
+      "fix_key": "column_not_found_with_suggestion",
+      "category": "unresolved_column_suggestion",
+      "notebook": "job_complexo_analise_churn",
+      "healed": false,
+      "static_fixes_applied": 0
     }
   ]
 }

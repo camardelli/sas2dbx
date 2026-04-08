@@ -39,6 +39,7 @@ def full_table(table_name: str) -> str:
 # Definição do database padrão para a sessão Spark
 # Equivalente a usar TELCO.<tabela> no SAS sem precisar qualificar toda vez
 # -----------------------------------------------------------------------------
+# [PREFLIGHT-BOOTSTRAP] Placeholders criados antes do deploy (preflight)
 spark.catalog.setCurrentCatalog(CATALOG)
 spark.catalog.setCurrentDatabase(SCHEMA)
 

@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>telcostar_churn.zip — Architecture Explorer</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+       background: #f8fafc; color: #1e293b; }
+header { background: #1e293b; color: #f8fafc; padding: 16px 24px;
+         display: flex; align-items: center; gap: 12px; }
+header h1 { font-size: 1.25rem; font-weight: 600; }
+.subtitle { font-size: 0.85rem; color: #94a3b8; }
+.metrics { display: flex; gap: 16px; padding: 20px 24px; flex-wrap: wrap; }
+.card { background: #fff; border: 1px solid #e2e8f0; border-radius: 8px;
+        padding: 16px 20px; min-width: 140px; }
+.card .label { font-size: 0.75rem; color: #64748b; text-transform: uppercase;
+               letter-spacing: .05em; margin-bottom: 4px; }
+.card .value { font-size: 1.75rem; font-weight: 700; }
+.card.green .value { color: #16a34a; }
+.card.red .value { color: #dc2626; }
+.card.blue .value { color: #2563eb; }
+.graph-section { padding: 0 24px 20px; }
+.graph-section h2 { font-size: 1rem; font-weight: 600; margin-bottom: 10px;
+                    color: #475569; }
+.svg-wrapper { background: #fff; border: 1px solid #e2e8f0; border-radius: 8px;
+               overflow-x: auto; padding: 16px; }
+.job-node { cursor: pointer; transition: filter 0.15s; }
+.job-node:hover rect { filter: brightness(0.88); }
+.job-node.selected rect { stroke: #f59e0b !important; stroke-width: 3 !important; }
+.edge { stroke: #94a3b8; stroke-width: 1.5; fill: none;
+        marker-end: url(#arrow); }
+.node-label { fill: #fff; font-size: 11px; font-weight: 500;
+              pointer-events: none; dominant-baseline: middle; text-anchor: middle; }
+.legend { display: flex; gap: 16px; padding: 0 24px 8px; flex-wrap: wrap; }
+.legend-item { display: flex; align-items: center; gap: 6px;
+               font-size: 0.78rem; color: #475569; }
+.legend-dot { width: 12px; height: 12px; border-radius: 3px; }
+#detail-panel { display: none; position: fixed; top: 0; right: 0; height: 100%;
+                width: 360px; background: #fff; border-left: 1px solid #e2e8f0;
+                box-shadow: -4px 0 16px rgba(0,0,0,.08); flex-direction: column;
+                overflow-y: auto; z-index: 100; }
+.detail-header { display: flex; justify-content: space-between; align-items: center;
+                 padding: 16px 20px; background: #1e293b; color: #f8fafc; }
+.detail-header h3 { font-size: 0.95rem; word-break: break-all; }
+.close-btn { background: none; border: none; color: #94a3b8; font-size: 1.2rem;
+             cursor: pointer; padding: 0 4px; }
+.close-btn:hover { color: #f8fafc; }
+.detail-body { padding: 16px 20px; display: flex; flex-direction: column; gap: 14px; }
+.detail-row { display: flex; flex-direction: column; gap: 4px; }
+.detail-row .lbl { font-size: 0.72rem; text-transform: uppercase; letter-spacing: .05em;
+                   color: #64748b; font-weight: 600; }
+.detail-row .val { font-size: 0.88rem; color: #1e293b; }
+.detail-row ul { list-style: none; display: flex; flex-direction: column; gap: 3px; }
+.detail-row li code { background: #f1f5f9; padding: 1px 6px; border-radius: 4px;
+                       font-size: 0.82rem; }
+.warn-item { background: #fef9c3; border-left: 3px solid #eab308; padding: 6px 10px;
+             border-radius: 0 4px 4px 0; font-size: 0.82rem; margin-bottom: 4px; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 99px;
+         font-size: 0.75rem; font-weight: 600; color: #fff; }
+.tier-rule { background: #16a34a; }
+.tier-llm { background: #2563eb; }
+.tier-manual { background: #dc2626; }
+.tier-mixed { background: #d97706; }
+.tier-unknown { background: #6b7280; }
+#d-error-row { background: #fee2e2; border-radius: 6px; padding: 8px 10px;
+               font-size: 0.82rem; color: #991b1b; }
+</style>
+</head>
+<body>
+<header>
+  <div><h1>telcostar_churn.zip</h1>  <div class="subtitle">Architecture Explorer · SAS2DBX</div></div>
+</header>
+<div class="metrics">
+  <div class="card"><div class="label">Total Jobs</div>  <div class="value">1</div></div>
+  <div class="card green"><div class="label">Migrados</div>  <div class="value">1</div></div>
+  <div class="card red"><div class="label">Falharam</div>  <div class="value">0</div></div>
+  <div class="card blue"><div class="label">% Automático</div>  <div class="value">100%</div></div>
+  <div class="card"><div class="label">Confiança Média</div>  <div class="value">85%</div></div>
+</div>
+<div class="legend"><div class="legend-item"><div class="legend-dot" style="background:#16a34a"></div>Tier 1 — Rule</div><div class="legend-item"><div class="legend-dot" style="background:#2563eb"></div>Tier 2 — LLM</div><div class="legend-item"><div class="legend-dot" style="background:#dc2626"></div>Tier 3 — Manual</div><div class="legend-item"><div class="legend-dot" style="background:#6b7280"></div>Não classificado</div></div>
+<div class="graph-section">
+  <h2>Grafo de Dependências</h2>
+  <div class="svg-wrapper"><svg width="248" height="138" xmlns="http://www.w3.org/2000/svg">
+<defs>
+  <marker id="arrow" markerWidth="8" markerHeight="8"     refX="7" refY="3" orient="auto">
+    <path d="M0,0 L0,6 L8,3 z" fill="#94a3b8"/>
+  </marker>
+</defs>
+  <g class="job-node" id="node-job_complexo_analise_churn" onclick="showDetail(&quot;job_complexo_analise_churn&quot;)">
+    <rect x="24" y="51" width="140" height="36"       rx="6" fill="#16a34a" stroke="#16a34a" stroke-width="1.5"/>
+    <text class="node-label" x="94" y="69">job_complexo_an…</text>
+  </g>
+</svg></div>
+</div>
+<div id="detail-panel">
+  <div class="detail-header">
+    <h3 id="d-name">—</h3>
+    <button class="close-btn" onclick="closeDetail()">✕</button>
+  </div>
+  <div class="detail-body">
+    <div class="detail-row">
+      <span class="lbl">Status</span>      <span class="val" id="d-status">—</span></div>
+    <div class="detail-row">
+      <span class="lbl">Tier</span>      <span class="badge" id="d-tier">—</span></div>
+    <div class="detail-row">
+      <span class="lbl">Confiança</span>      <span class="val" id="d-conf">—</span></div>
+    <div class="detail-row">
+      <span class="lbl">Objetivo</span>      <span class="val" id="d-objective">—</span></div>
+    <div class="detail-row">
+      <span class="lbl">Inputs</span>      <ul id="d-inputs"></ul></div>
+    <div class="detail-row">
+      <span class="lbl">Outputs</span>      <ul id="d-outputs"></ul></div>
+    <div class="detail-row">
+      <span class="lbl">Warnings</span>      <div id="d-warnings">—</div></div>
+    <div class="detail-row" id="d-error-row" style="display:none">
+      <span class="lbl">Erro</span>      <span id="d-error"></span></div>
+    <div class="detail-row">
+      <span class="lbl">Prerequisitos</span>      <span class="val" id="d-prereqs">—</span></div>
+    <div class="detail-row">
+      <span class="lbl">Dependentes</span>      <span class="val" id="d-deps">—</span></div>
+  </div>
+</div>
+<script>
+const DATA = {
+  "project": "telcostar_churn.zip",
+  "summary": {
+    "total_jobs": 1,
+    "done": 1,
+    "failed": 0,
+    "auto_pct": 1.0,
+    "avg_confidence": 0.8556
+  },
+  "jobs": {
+    "job_complexo_analise_churn": {
+      "name": "job_complexo_analise_churn",
+      "status": "done",
+      "tier": "rule",
+      "confidence": 0.8556,
+      "inputs": [
+        "STAGING",
+        "WORK.FREQ_RISCO",
+        "WORK.PRE_PIVOT"
+      ],
+      "outputs": [
+        "STAGING",
+        "WORK.FREQ_CHURN_RISCO",
+        "WORK.FREQ_PLANO_RISCO",
+        "WORK.FREQ_RISCO"
+      ],
+      "macros": [
+        "AGREGA_METRICAS",
+        "CALC_CHURN_SCORE",
+        "CARGA_DW",
+        "GERA_FREQUENCIAS",
+        "IDENTIFICA_EVENTOS_CHURN",
+        "TRANSPOE_METRICAS"
+      ],
+      "objective": "Este job realiza a análise mensal de propensão ao cancelamento (churn) de clientes da Telcostar S.A., calculando um score de risco individual com base em padrões de uso, histórico de contatos com supo",
+      "warnings": [],
+      "error": null,
+      "prereqs": [],
+      "dependents": []
+    }
+  },
+  "edges": [],
+  "execution_order": [
+    "job_complexo_analise_churn"
+  ]
+};
+
+function showDetail(jobKey) {
+  const job = DATA.jobs[jobKey];
+  if (!job) return;
+
+  document.getElementById('d-name').textContent = job.name;
+  document.getElementById('d-status').textContent =
+    ({'done':'✅ done','failed':'❌ failed',
+      'pending':'⏳ pending','in_progress':'🔄 in_progress'}[job.status] || job.status);
+  document.getElementById('d-tier').textContent = job.tier;
+  document.getElementById('d-tier').className = 'badge tier-' + job.tier;
+  document.getElementById('d-conf').textContent = (job.confidence * 100).toFixed(0) + '%';
+  document.getElementById('d-objective').textContent = job.objective || '—';
+
+  const inList = document.getElementById('d-inputs');
+  inList.innerHTML = job.inputs.length
+    ? job.inputs.map(i => '<li><code>' + i + '</code></li>').join('')
+    : '<li><em>nenhum detectado</em></li>';
+
+  const outList = document.getElementById('d-outputs');
+  outList.innerHTML = job.outputs.length
+    ? job.outputs.map(o => '<li><code>' + o + '</code></li>').join('')
+    : '<li><em>nenhum detectado</em></li>';
+
+  const warnDiv = document.getElementById('d-warnings');
+  warnDiv.innerHTML = job.warnings && job.warnings.length
+    ? job.warnings.map(w => '<div class="warn-item">' + w + '</div>').join('')
+    : '<em>nenhum</em>';
+
+  if (job.error) {
+    document.getElementById('d-error-row').style.display = 'block';
+    document.getElementById('d-error').textContent = job.error;
+  } else {
+    document.getElementById('d-error-row').style.display = 'none';
+  }
+
+  document.getElementById('d-prereqs').textContent = job.prereqs.join(', ') || '—';
+  document.getElementById('d-deps').textContent = job.dependents.join(', ') || '—';
+
+  document.getElementById('detail-panel').style.display = 'flex';
+
+  document.querySelectorAll('.job-node').forEach(n => n.classList.remove('selected'));
+  const node = document.getElementById('node-' + jobKey.replace(/[^a-zA-Z0-9_]/g, '_'));
+  if (node) node.classList.add('selected');
+}
+
+function closeDetail() {
+  document.getElementById('detail-panel').style.display = 'none';
+  document.querySelectorAll('.job-node').forEach(n => n.classList.remove('selected'));
+}
+</script>
+</body>
+</html>
